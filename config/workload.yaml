@@ -1,0 +1,14 @@
+server:
+  base_url: "http://localhost:8080/completion"
+  model_alias: "llama-2-7b-chat"
+
+workload:
+  users: 10               # Number of concurrent users (for static mode)
+  duration_seconds: 60    # Total test duration
+  ramp_up_seconds: 10     # Time to reach full concurrency (0 for static)
+  seed: 42                # Deterministic PRNG seed
+
+prompts:
+  min_tokens: 50
+  max_tokens: 200
+  prefix: "Please summarize the following text: "
