@@ -210,23 +210,26 @@ class PrometheusExporter:
         """
         try:
             # Prepare auth handler if credentials provided
-            handler = None
+            # Prepare push arguments
+            push_kwargs = {
+                'gateway': self.pushgateway_url,
+                'job': self.job_name,
+                'registry': self.registry,
+                'timeout': timeout,
+                'grouping_key': {'instance': self.instance_name}
+            }
+            
+            # Prepare auth handler if credentials provided
             if self.username and self.password:
-                def handler(url, method, timeout, headers, data):
+                def auth_handler(url, method, timeout, headers, data):
                     return basic_auth_handler(
                         url, method, timeout, headers, data,
                         self.username, self.password
                     )
+                push_kwargs['handler'] = auth_handler
 
             # Push to gateway
-            push_to_gateway(
-                gateway=self.pushgateway_url,
-                job=self.job_name,
-                registry=self.registry,
-                timeout=timeout,
-                handler=handler,
-                grouping_key={'instance': self.instance_name}
-            )
+            push_to_gateway(**push_kwargs)
 
             logger.debug(f"Metrics pushed successfully to {self.pushgateway_url}")
             return True

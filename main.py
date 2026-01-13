@@ -15,7 +15,11 @@ from colorama import Fore, Style, init
 from src.client.api_client import LoadTester
 from src.generators.prompt_factory import PromptFactory
 from src.metrics.stats import StatsCalculator, RequestMetrics
-from src.metrics.prometheus_exporter import PrometheusExporter
+try:
+    from src.metrics.prometheus_exporter import PrometheusExporter
+except ImportError:
+    PrometheusExporter = None
+    logging.warning("prometheus_client not found. Prometheus metrics export will be unavailable.")
 
 # Initialize colorama
 init(autoreset=True)
@@ -180,14 +184,17 @@ async def main():
     prom_exporter = None
     prom_conf = config.get("prometheus", {})
     if prom_conf.get("enabled", False):
-        prom_exporter = PrometheusExporter(
-            pushgateway_url=prom_conf["pushgateway_url"],
-            job_name=prom_conf.get("job_name", "llm_load_test"),
-            instance_name=prom_conf.get("instance_name", "local"),
-            username=prom_conf.get("username"),
-            password=prom_conf.get("password")
-        )
-        logger.info(f"Prometheus integration enabled: {prom_conf['pushgateway_url']}")
+        if PrometheusExporter is None:
+            logger.warning("Prometheus enabled in config but 'prometheus_client' library is missing. Disabling Prometheus.")
+        else:
+            prom_exporter = PrometheusExporter(
+                pushgateway_url=prom_conf["pushgateway_url"],
+                job_name=prom_conf.get("job_name", "llm_load_test"),
+                instance_name=prom_conf.get("instance_name", "local"),
+                username=prom_conf.get("username"),
+                password=prom_conf.get("password")
+            )
+            logger.info(f"Prometheus integration enabled: {prom_conf['pushgateway_url']}")
 
     # Create Output Directory
     os.makedirs(args.output, exist_ok=True)
