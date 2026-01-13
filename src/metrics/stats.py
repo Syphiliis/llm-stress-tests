@@ -11,6 +11,7 @@ class RequestMetrics:
     ttft: float = 0.0  # Time to first token
     output_tokens: int = 0
     error: Optional[str] = None
+    endpoint: Optional[str] = None  # Track which endpoint was used (for mixed warfare)
 
     @property
     def latency_seconds(self) -> float:
@@ -49,6 +50,11 @@ class StatsCalculator:
         self.metrics: List[RequestMetrics] = []
         self.start_time = 0.0
         self.end_time = 0.0
+
+        # For incremental tracking
+        self._last_snapshot_count = 0
+        self._last_snapshot_tokens = 0
+        self._last_snapshot_errors = 0
 
     def start_test(self):
         self.start_time = time.time()
@@ -111,7 +117,7 @@ class StatsCalculator:
 
     def analyze_results(self, summary: TestSummary) -> List[str]:
         verdicts = []
-        
+
         # 1. Error Rate Analysis
         if summary.total_requests > 0:
             error_rate = summary.failed_requests / summary.total_requests
@@ -121,7 +127,7 @@ class StatsCalculator:
                 verdicts.append(f"WARNING: Non-zero Failure Rate ({error_rate:.1%}). Investigate errors.")
             else:
                 verdicts.append("PASS: Error rate is acceptable (0%).")
-        
+
         # 2. Latency Analysis (P90)
         # Thresholds: < 5s (Good), > 30s (Critical) for heavy load
         if summary.latency_p90 > 30.0:
@@ -141,3 +147,109 @@ class StatsCalculator:
              verdicts.append(f"WARNING: TTFT is acceptable but could be better ({summary.ttft_p50:.2f}s).")
 
         return verdicts
+
+    def get_current_snapshot(self) -> Dict[str, float]:
+        """
+        Calculate current metrics snapshot without stopping the test.
+        Used for real-time Prometheus updates.
+
+        Returns:
+            Dictionary with current metric values
+        """
+        if not self.metrics:
+            return {
+                'latency_p50': 0.0,
+                'latency_p90': 0.0,
+                'latency_p99': 0.0,
+                'ttft_p50': 0.0,
+                'ttft_p90': 0.0,
+                'ttft_p99': 0.0,
+                'tps': 0.0,
+                'rps': 0.0,
+                'error_rate': 0.0,
+                'contention_error_rate': 0.0
+            }
+
+        # Calculate elapsed time from start
+        elapsed_time = time.time() - self.start_time if self.start_time > 0 else 1.0
+        if elapsed_time <= 0:
+            elapsed_time = 1.0
+
+        successful = [m for m in self.metrics if m.error is None]
+        failed = [m for m in self.metrics if m.error is not None]
+
+        # Calculate error rates
+        total_count = len(self.metrics)
+        error_rate = len(failed) / total_count if total_count > 0 else 0.0
+
+        # Contention errors: timeouts, 503s, connection errors
+        contention_errors = [
+            m for m in failed
+            if m.error and any(
+                keyword in m.error.lower()
+                for keyword in ['timeout', '503', 'unavailable', 'connection']
+            )
+        ]
+        contention_error_rate = len(contention_errors) / total_count if total_count > 0 else 0.0
+
+        # Calculate throughput
+        total_tokens = sum(m.output_tokens for m in successful)
+        tps = total_tokens / elapsed_time
+        rps = len(successful) / elapsed_time
+
+        # Calculate percentiles
+        if successful:
+            ttfts = [m.ttft for m in successful]
+            latencies = [m.latency_seconds for m in successful]
+
+            ttft_p50 = float(np.percentile(ttfts, 50))
+            ttft_p90 = float(np.percentile(ttfts, 90))
+            ttft_p99 = float(np.percentile(ttfts, 99))
+
+            lat_p50 = float(np.percentile(latencies, 50))
+            lat_p90 = float(np.percentile(latencies, 90))
+            lat_p99 = float(np.percentile(latencies, 99))
+        else:
+            ttft_p50 = ttft_p90 = ttft_p99 = 0.0
+            lat_p50 = lat_p90 = lat_p99 = 0.0
+
+        return {
+            'latency_p50': lat_p50,
+            'latency_p90': lat_p90,
+            'latency_p99': lat_p99,
+            'ttft_p50': ttft_p50,
+            'ttft_p90': ttft_p90,
+            'ttft_p99': ttft_p99,
+            'tps': tps,
+            'rps': rps,
+            'error_rate': error_rate,
+            'contention_error_rate': contention_error_rate
+        }
+
+    def get_delta_counts(self) -> Dict[str, int]:
+        """
+        Get incremental counts since last snapshot.
+        Used for Prometheus Counter metrics.
+
+        Returns:
+            Dictionary with delta counts for requests, errors, and tokens
+        """
+        current_total = len(self.metrics)
+        successful = [m for m in self.metrics if m.error is None]
+        failed = [m for m in self.metrics if m.error is not None]
+
+        current_tokens = sum(m.output_tokens for m in successful)
+        current_errors = len(failed)
+
+        deltas = {
+            'requests': current_total - self._last_snapshot_count,
+            'errors': current_errors - self._last_snapshot_errors,
+            'tokens': current_tokens - self._last_snapshot_tokens
+        }
+
+        # Update last snapshot values
+        self._last_snapshot_count = current_total
+        self._last_snapshot_errors = current_errors
+        self._last_snapshot_tokens = current_tokens
+
+        return deltas

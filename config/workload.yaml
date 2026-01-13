@@ -12,3 +12,21 @@ prompts:
   min_tokens: 50
   max_tokens: 200
   prefix: "Please summarize the following text: "
+
+# Prometheus Pushgateway Configuration
+prometheus:
+  enabled: true
+  pushgateway_url: "localhost:9091"  # Pushgateway address (without http://)
+  job_name: "llm_load_test"
+  instance_name: "local_test"
+  push_interval_seconds: 5  # How often to push metrics during test
+  # Optional authentication
+  # username: "admin"
+  # password: "secret"
+
+client:
+  timeout_seconds: 60      # Global timeout for requests
+  connect_timeout: 10      # Timeout for establishing connection
+  retries: 3               # Number of retries for failed requests
+  backoff_factor: 1.5      # Exponential backoff factor
+

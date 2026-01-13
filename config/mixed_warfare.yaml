@@ -1,0 +1,34 @@
+# Mixed Warfare Configuration
+# Tests two models simultaneously to observe resource contention
+
+# Define multiple servers/models to test
+servers:
+  - name: "Thinker"
+    base_url: "http://127.0.0.1:8080/completion"
+    model_alias: "llama-2-70b-chat"  # Larger model (slower, more resource intensive)
+    weight: 0.3  # 30% of requests go here
+
+  - name: "Flash"
+    base_url: "http://127.0.0.1:8081/completion"
+    model_alias: "llama-2-7b-chat"   # Smaller model (faster, less resource intensive)
+    weight: 0.7  # 70% of requests go here
+
+workload:
+  users: 20
+  duration_seconds: 120
+  ramp_up_seconds: 10
+  seed: 42
+  scenario: "mixed_warfare"  # Enables multi-endpoint testing
+
+prompts:
+  min_tokens: 50
+  max_tokens: 200
+  prefix: "Please summarize the following text: "
+
+# Prometheus Pushgateway Configuration
+prometheus:
+  enabled: true
+  pushgateway_url: "localhost:9091"
+  job_name: "llm_mixed_warfare"
+  instance_name: "contention_test"
+  push_interval_seconds: 5
