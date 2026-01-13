@@ -108,3 +108,36 @@ class StatsCalculator:
             latency_p90=lat_p90,
             latency_p99=lat_p99
         )
+
+    def analyze_results(self, summary: TestSummary) -> List[str]:
+        verdicts = []
+        
+        # 1. Error Rate Analysis
+        if summary.total_requests > 0:
+            error_rate = summary.failed_requests / summary.total_requests
+            if error_rate > 0.10:
+                verdicts.append(f"CRITICAL: High Failure Rate ({error_rate:.1%}). System is unstable.")
+            elif error_rate > 0.01:
+                verdicts.append(f"WARNING: Non-zero Failure Rate ({error_rate:.1%}). Investigate errors.")
+            else:
+                verdicts.append("PASS: Error rate is acceptable (0%).")
+        
+        # 2. Latency Analysis (P90)
+        # Thresholds: < 5s (Good), > 30s (Critical) for heavy load
+        if summary.latency_p90 > 30.0:
+            verdicts.append(f"CRITICAL: P90 Latency is extremely high ({summary.latency_p90:.2f}s). System is overloaded.")
+        elif summary.latency_p90 > 5.0:
+            verdicts.append(f"WARNING: P90 Latency is high ({summary.latency_p90:.2f}s). User experience degraded.")
+        else:
+            verdicts.append(f"PASS: P90 Latency is good ({summary.latency_p90:.2f}s).")
+
+        # 3. TTFT Analysis (P50)
+        # Thresholds: < 0.5s (Excellent), < 2s (Acceptable)
+        if summary.ttft_p50 > 2.0:
+            verdicts.append(f"CRITICAL: Time To First Token (P50) is slow ({summary.ttft_p50:.2f}s). Model is struggling.")
+        elif summary.ttft_p50 < 0.5:
+             verdicts.append(f"PASS: TTFT is excellent ({summary.ttft_p50:.2f}s).")
+        else:
+             verdicts.append(f"WARNING: TTFT is acceptable but could be better ({summary.ttft_p50:.2f}s).")
+
+        return verdicts

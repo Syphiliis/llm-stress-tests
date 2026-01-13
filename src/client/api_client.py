@@ -82,6 +82,7 @@ class LoadTester:
         if ttft == 0.0: 
              ttft = end_time - start_time
 
+        logger.info(f"Request {req_id} finished: {output_tokens} tokens in {end_time - start_time:.2f}s")
         return RequestMetrics(
             request_id=req_id,
             start_time=start_time,

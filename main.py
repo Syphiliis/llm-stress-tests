@@ -127,6 +127,17 @@ async def main():
     print(f"P90: {summary.ttft_p90:.3f}")
     print(f"P99: {summary.ttft_p99:.3f}")
 
+    # Analysis Verdicts
+    print(f"\n{Fore.MAGENTA}=== Automatic Analysis ===")
+    verdicts = stats.analyze_results(summary)
+    for v in verdicts:
+        color = Fore.GREEN
+        if "CRITICAL" in v:
+            color = Fore.RED
+        elif "WARNING" in v:
+            color = Fore.YELLOW
+        print(f"{color}{v}")
+
     # Save details
     detailed_metrics = [
         {
