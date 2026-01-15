@@ -1,5 +1,5 @@
 server:
-  base_url: "http://127.0.0.1:8080/completion" # Tunneling remote port 8080 to local 8080
+  base_url: "http://24.124.32.70:8080/completion" # Direct connection to Remote GPU Public IP
   model_alias: "remote-gpu-model"
 
 workload:

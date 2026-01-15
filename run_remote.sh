@@ -1,16 +1,12 @@
 #!/bin/bash
 
 # Configuration
-REMOTE_USER="root"
 REMOTE_HOST="24.124.32.70"
-REMOTE_SSH_PORT="38700"
-REMOTE_MODEL_PORT="8080" # Port where the model is listening on the remote server
-LOCAL_PORT="8080"
+REMOTE_PORT="8080"
 CONFIG_FILE="config/remote_gpu.yaml"
 
-echo "=== LLM Stress Test: Remote GPU Setup ==="
-echo "Target: $REMOTE_USER@$REMOTE_HOST:$REMOTE_SSH_PORT"
-echo "Tunnel: Localhost:$LOCAL_PORT -> Remote:$REMOTE_MODEL_PORT"
+echo "=== LLM Stress Test: Remote GPU (Direct Connect) ==="
+echo "Target: http://$REMOTE_HOST:$REMOTE_PORT"
 
 # Check for config file
 if [ ! -f "$CONFIG_FILE" ]; then
@@ -18,39 +14,17 @@ if [ ! -f "$CONFIG_FILE" ]; then
     exit 1
 fi
 
-# 1. Establish SSH Tunnel
-echo ">> establishing SSH tunnel..."
-# -N: Do not execute a remote command.
-# -L: Specifies that connections to the given TCP port or Unix socket on the local (client) host are to be forwarded to the given host and port, or Unix socket, on the remote side.
-# -f: Requests ssh to go to background just before command execution.
-ssh -f -N -L $LOCAL_PORT:localhost:$REMOTE_MODEL_PORT -p $REMOTE_SSH_PORT $REMOTE_USER@$REMOTE_HOST
+# 1. Connectivity Check
+echo ">> Checking connectivity to $REMOTE_HOST:$REMOTE_PORT..."
 
-if [ $? -ne 0 ]; then
-    echo "Error: Failed to establish SSH tunnel."
-    echo "Please check your SSH keys and connectivity."
-    exit 1
+if nc -z -w 2 $REMOTE_HOST $REMOTE_PORT 2>/dev/null; then
+    echo ">> Success: Port $REMOTE_PORT is reachable."
+else
+    echo ">> WARNING: Could not connect to $REMOTE_HOST:$REMOTE_PORT."
+    echo "   Please make sure the firewall on the GPU server allows incoming traffic on port $REMOTE_PORT."
+    echo "   Continuing anyway (in case ICMP is blocked but HTTP works)..."
 fi
 
-TUNNEL_PID=$(pgrep -f "ssh -f -N -L $LOCAL_PORT")
-echo ">> Tunnel established (PID likely $TUNNEL_PID)"
-
-# Function to cleanup tunnel on exit
-cleanup() {
-    echo ""
-    echo ">> Cleaning up..."
-    if [ ! -z "$TUNNEL_PID" ]; then
-        echo ">> Killing SSH tunnel..."
-        pkill -f "ssh -f -N -L $LOCAL_PORT"
-    fi
-    echo ">> Done."
-}
-trap cleanup EXIT
-
-# 2. Wait a moment for tunnel to settle
-sleep 2
-
-# 3. Run the Python Load Tester
+# 2. Run the Python Load Tester
 echo ">> Starting Load Test..."
 python main.py --config $CONFIG_FILE
-
-# Cleanup happens automatically via trap
