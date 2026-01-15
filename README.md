@@ -57,6 +57,20 @@ server:
 
 > **Note**: For Ollama, you might need to ensure the model is loaded before starting the test, as the first request often incurs model loading latency.
 
+## Remote Testing
+For testing a remote GPU server (e.g., from a VPS), use the provided wrapper script:
+
+```bash
+./run_remote.sh
+```
+
+This script:
+1.  Target configuration is in `config/remote_gpu.yaml`.
+2.  Checks connectivity to the remote server (default `24.124.32.70:8080`).
+3.  Runs the stress test using the remote configuration.
+
+**Requirement**: The remote server must allow incoming traffic on port `8080` (or your configured model port).
+
 ## Usage
 
 Run the load tester:
