@@ -1,0 +1,21 @@
+server:
+  base_url: "http://localhost:12345/v1/completions" # Dummy port
+  model_alias: "test-model"
+
+workload:
+  users: 1
+  duration_seconds: 5
+  ramp_up_seconds: 0
+  seed: 123
+
+prompts:
+  min_tokens: 10
+  max_tokens: 20
+  prefix: "test"
+
+prometheus:
+  enabled: false
+
+client:
+  retries: 0
+  connect_timeout: 1

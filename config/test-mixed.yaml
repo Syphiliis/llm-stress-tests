@@ -1,0 +1,23 @@
+servers:
+  - name: "Primary"
+    base_url: "http://localhost:12345/v1"
+    weight: 0.5
+  - name: "Secondary"
+    base_url: "http://localhost:12346/v1"
+    weight: 0.5
+
+workload:
+  users: 2
+  duration_seconds: 5
+  seed: 123
+
+prompts:
+  min_tokens: 10
+  max_tokens: 20
+
+prometheus:
+  enabled: false
+
+client:
+  retries: 0
+  connect_timeout: 1

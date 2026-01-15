@@ -1,0 +1,29 @@
+# Flash Only Configuration
+# Scenario A: Heavy load on Flash model only (port 38703)
+# Faster, lighter model - good for high-throughput scenarios
+
+server:
+  name: "Flash"
+  base_url: "http://24.124.32.70:38703/completion"
+  model_alias: "flash-model"
+
+workload:
+  users: 15
+  duration_seconds: 300
+  ramp_up_seconds: 60
+  seed: 42
+  scenario: "flash_only"
+
+prompts:
+  min_tokens: 50
+  max_tokens: 200
+  prefix: "Explain briefly: "
+
+client:
+  timeout_seconds: 120
+  connect_timeout: 30
+  retries: 3
+  backoff_factor: 2.0
+
+prometheus:
+  enabled: false

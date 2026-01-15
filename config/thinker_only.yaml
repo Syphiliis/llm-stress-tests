@@ -1,0 +1,29 @@
+# Thinker Only Configuration
+# Scenario B: Heavy load on Thinker model only (port 38704)
+# Larger, more resource-intensive model - tests heavy inference workloads
+
+server:
+  name: "Thinker"
+  base_url: "http://24.124.32.70:38704/completion"
+  model_alias: "thinker-model"
+
+workload:
+  users: 8
+  duration_seconds: 300
+  ramp_up_seconds: 120
+  seed: 42
+  scenario: "thinker_only"
+
+prompts:
+  min_tokens: 50
+  max_tokens: 200
+  prefix: "Explain briefly: "
+
+client:
+  timeout_seconds: 240     # Longer timeout for heavier model
+  connect_timeout: 30
+  retries: 5
+  backoff_factor: 2.0
+
+prometheus:
+  enabled: false
