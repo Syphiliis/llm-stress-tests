@@ -300,14 +300,26 @@ class LoadTestOrchestrator:
         
         # Print automated analysis verdicts
         verdicts = self.stats.analyze_results(summary)
+        
+        # Add capacity recommendation based on results
+        users = self.config.workload.users
+        if summary.latency_p90 is not None:
+             if summary.latency_p90 > 30.0:
+                 verdicts.append(f"{Fore.RED}CAPACITY: System overloaded with {users} users. Recommend reducing concurrency (start with {max(1, int(users*0.5))} users).")
+             elif summary.latency_p90 < 2.0:
+                 verdicts.append(f"{Fore.GREEN}CAPACITY: System handles {users} users comfortably. You can likely increase load.")
+             else:
+                 verdicts.append(f"{Fore.YELLOW}CAPACITY: System implies load is moderate/heavy at {users} users.")
+
         if verdicts:
             print(f"\n{Fore.MAGENTA}=== Automated Analysis ===")
             for v in verdicts:
                 color = Fore.GREEN
-                if "CRITICAL" in v: color = Fore.RED
-                elif "WARNING" in v: color = Fore.YELLOW
+                if "CRITICAL" in v or "CAPACITY" in v and "overloaded" in v: color = Fore.RED
+                elif "WARNING" in v or "CAPACITY" in v and "moderate" in v: color = Fore.YELLOW
                 elif "INFO" in v: color = Fore.BLUE
                 elif "N/A" in v: color = Fore.LIGHTBLACK_EX
+                elif "CAPACITY" in v and "comfortably" in v: color = Fore.GREEN
                 print(f"{color}{v}")
 
         print(f"Total Requests: {summary.total_requests}")
@@ -316,6 +328,15 @@ class LoadTestOrchestrator:
         print(f"Duration: {summary.total_duration:.2f}s")
         print(f"RPS: {summary.rps:.2f}")
         print(f"Global Throughput: {summary.global_throughput_tokens_per_sec:.2f} tokens/sec")
+
+        # Print Legend
+        print(f"\n{Fore.WHITE}=== Legend ===")
+        print(f"{Fore.LIGHTBLACK_EX}  P50 (Median)   : {Fore.WHITE}50% of requests were faster than this.")
+        print(f"{Fore.LIGHTBLACK_EX}  P90            : {Fore.WHITE}90% of requests were faster than this (excludes worst outliers).")
+        print(f"{Fore.LIGHTBLACK_EX}  TTFT           : {Fore.WHITE}Time To First Token (response reactiveness).")
+        print(f"{Fore.LIGHTBLACK_EX}  Latency        : {Fore.WHITE}Total request processing time.")
+        print(f"{Fore.LIGHTBLACK_EX}  Stdev (Jitter) : {Fore.WHITE}Stability metric (lower is better). High = unstable.")
+        print(f"{Fore.LIGHTBLACK_EX}  RPS            : {Fore.WHITE}Requests Per Second (system throughput).")
         
         # Latency section with stdev
         print(f"\n{Fore.YELLOW}=== Latency (s) ===")
