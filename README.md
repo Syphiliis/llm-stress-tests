@@ -66,10 +66,10 @@ For testing a remote GPU server (e.g., from a VPS), use the provided wrapper scr
 
 This script:
 1.  Target configuration is in `config/remote_gpu.yaml`.
-2.  Checks connectivity to the remote server (default `24.124.32.70:8080`).
+2.  Checks connectivity to the remote server (default `24.124.32.70:38703`).
 3.  Runs the stress test using the remote configuration.
 
-**Requirement**: The remote server must allow incoming traffic on port `8080` (or your configured model port).
+**Requirement**: The remote server must allow incoming traffic on port `38703` (mapped from Docker container port `8080`).
 
 ## Usage
 

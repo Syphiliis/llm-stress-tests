@@ -1,5 +1,5 @@
 server:
-  base_url: "http://24.124.32.70:8080/completion" # Direct connection to Remote GPU Public IP
+  base_url: "http://24.124.32.70:38703/completion" # Direct connection to Remote GPU (Mapped Port)
   model_alias: "remote-gpu-model"
 
 workload:

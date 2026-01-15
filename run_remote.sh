@@ -2,7 +2,7 @@
 
 # Configuration
 REMOTE_HOST="24.124.32.70"
-REMOTE_PORT="8080"
+REMOTE_PORT="38703"
 CONFIG_FILE="config/remote_gpu.yaml"
 
 echo "=== LLM Stress Test: Remote GPU (Direct Connect) ==="
