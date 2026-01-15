@@ -3,22 +3,21 @@ server:
   model_alias: "remote-gpu-model"
 
 workload:
-  users: 5                # Start conservative for remote network
-  duration_seconds: 60    # Short test to verify connectivity
-  ramp_up_seconds: 5
+  users: 10               # Target 10 users max
+  duration_seconds: 300   # 5 minutes test
+  ramp_up_seconds: 240    # Very slow ramp-up: 1 new user every 24 seconds
   seed: 42
 
 prompts:
-  min_tokens: 20
-  max_tokens: 100
+  min_tokens: 50
+  max_tokens: 200         # Little bit more work for the GPU
   prefix: "Explain briefly: "
 
 prometheus:
-  enabled: false          # Disable by default for simple remote run
-  pushgateway_url: "localhost:9091"
+  enabled: false
 
 client:
-  timeout_seconds: 120    # Increased timeout for network latency
-  connect_timeout: 20
+  timeout_seconds: 180    # Very generous timeout (3 min)
+  connect_timeout: 30     # Time to establish connection
   retries: 5
   backoff_factor: 2.0
