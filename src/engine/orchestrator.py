@@ -298,6 +298,18 @@ class LoadTestOrchestrator:
         if summary.is_failed:
             print(f"{Fore.RED}STATUS: FAILED (100% error rate)")
         
+        # Print automated analysis verdicts
+        verdicts = self.stats.analyze_results(summary)
+        if verdicts:
+            print(f"\n{Fore.MAGENTA}=== Automated Analysis ===")
+            for v in verdicts:
+                color = Fore.GREEN
+                if "CRITICAL" in v: color = Fore.RED
+                elif "WARNING" in v: color = Fore.YELLOW
+                elif "INFO" in v: color = Fore.BLUE
+                elif "N/A" in v: color = Fore.LIGHTBLACK_EX
+                print(f"{color}{v}")
+
         print(f"Total Requests: {summary.total_requests}")
         print(f"Successful: {summary.successful_requests}")
         print(f"Failed: {summary.failed_requests}")
