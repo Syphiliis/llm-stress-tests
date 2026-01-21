@@ -134,6 +134,85 @@ def get_gpu_ip():
             print(f"{Fore.RED}✗ Invalid IP address. Please try again.{Style.RESET_ALL}")
 
 
+def get_custom_ports(test_choice):
+    """Ask user if they want to customize ports"""
+    config_info = TEST_CONFIGS[test_choice]
+    
+    if test_choice == "5":  # Custom config
+        return None
+    
+    print_section("Port Configuration")
+    
+    if config_info["single_server"]:
+        default_port = config_info["port"]
+        print(f"  Default port: {default_port}")
+        customize = get_input("Use custom port? (y/n)", "n").lower()
+        
+        if customize == "y":
+            while True:
+                try:
+                    port = int(get_input("Enter port number", str(default_port)))
+                    if 1 <= port <= 65535:
+                        return port
+                    else:
+                        print(f"{Fore.RED}✗ Port must be between 1 and 65535{Style.RESET_ALL}")
+                except ValueError:
+                    print(f"{Fore.RED}✗ Invalid port number{Style.RESET_ALL}")
+        return default_port
+    else:
+        default_ports = config_info["ports"]
+        print(f"  Default ports: {', '.join(map(str, default_ports))}")
+        customize = get_input("Use custom ports? (y/n)", "n").lower()
+        
+        if customize == "y":
+            ports = []
+            for i, default_port in enumerate(default_ports):
+                while True:
+                    try:
+                        port = int(get_input(f"Enter port {i+1}/{len(default_ports)}", str(default_port)))
+                        if 1 <= port <= 65535:
+                            ports.append(port)
+                            break
+                        else:
+                            print(f"{Fore.RED}✗ Port must be between 1 and 65535{Style.RESET_ALL}")
+                    except ValueError:
+                        print(f"{Fore.RED}✗ Invalid port number{Style.RESET_ALL}")
+            return ports
+        return default_ports
+
+
+def check_dependencies():
+    """Check if required Python packages are installed"""
+    print_section("Dependency Check")
+    
+    required_packages = [
+        ("pydantic", "pydantic"),
+        ("aiohttp", "aiohttp"),
+        ("colorama", "colorama"),
+        ("yaml", "PyYAML")
+    ]
+    
+    missing = []
+    for module_name, package_name in required_packages:
+        try:
+            __import__(module_name)
+            print(f"  {Fore.GREEN}✓{Style.RESET_ALL} {package_name}")
+        except ImportError:
+            print(f"  {Fore.RED}✗{Style.RESET_ALL} {package_name} (missing)")
+            missing.append(package_name)
+    
+    if missing:
+        print(f"\n{Fore.RED}✗ Missing dependencies: {', '.join(missing)}{Style.RESET_ALL}")
+        print(f"\n{Fore.YELLOW}Install them with:{Style.RESET_ALL}")
+        print(f"  pip install {' '.join(missing)}")
+        print(f"\n{Fore.YELLOW}Or install all requirements:{Style.RESET_ALL}")
+        print(f"  pip install -r requirements.txt")
+        return False
+    
+    print(f"\n{Fore.GREEN}✓ All dependencies installed{Style.RESET_ALL}")
+    return True
+
+
 def get_webui_ip():
     """Get Open WebUI VPS IP from user"""
     print_section("Open WebUI VPS Configuration")
@@ -158,8 +237,8 @@ def select_test():
             print(f"{Fore.RED}✗ Invalid choice. Please select 1-5.{Style.RESET_ALL}")
 
 
-def create_dynamic_config(gpu_ip, test_choice):
-    """Create a temporary config file with user-specified IPs"""
+def create_dynamic_config(gpu_ip, test_choice, custom_ports=None):
+    """Create a temporary config file with user-specified IPs and ports"""
     config_info = TEST_CONFIGS[test_choice]
     
     # For custom config, just return the file path
@@ -179,18 +258,19 @@ def create_dynamic_config(gpu_ip, test_choice):
         print(f"{Fore.RED}✗ Template config not found: {template_path}{Style.RESET_ALL}")
         sys.exit(1)
     
-    # Update IP addresses in config
+    # Update IP addresses and ports in config
     if config_info["single_server"]:
         # Single server config
         if "server" in config:
-            port = config_info["port"]
+            port = custom_ports if custom_ports else config_info["port"]
             config["server"]["base_url"] = f"http://{gpu_ip}:{port}/completion"
     else:
         # Multi-server config
         if "servers" in config:
+            ports = custom_ports if custom_ports else config_info["ports"]
             for i, server in enumerate(config["servers"]):
-                if i < len(config_info["ports"]):
-                    port = config_info["ports"][i]
+                if i < len(ports):
+                    port = ports[i]
                     server["base_url"] = f"http://{gpu_ip}:{port}/completion"
     
     # Create temporary config file
@@ -203,7 +283,7 @@ def create_dynamic_config(gpu_ip, test_choice):
     return temp_config_path
 
 
-def verify_connectivity(gpu_ip, test_choice):
+def verify_connectivity(gpu_ip, test_choice, custom_ports=None):
     """Verify connectivity to GPU server"""
     print_section("Connectivity Check")
     
@@ -215,9 +295,9 @@ def verify_connectivity(gpu_ip, test_choice):
     
     ports_to_check = []
     if config_info["single_server"]:
-        ports_to_check = [config_info["port"]]
+        ports_to_check = [custom_ports if custom_ports else config_info["port"]]
     else:
-        ports_to_check = config_info["ports"]
+        ports_to_check = custom_ports if custom_ports else config_info["ports"]
     
     all_ok = True
     for port in ports_to_check:
@@ -309,6 +389,10 @@ async def main():
     """Main CLI flow"""
     print_header()
     
+    # Check dependencies first
+    if not check_dependencies():
+        sys.exit(1)
+    
     # Get GPU server IP
     gpu_ip = get_gpu_ip()
     
@@ -319,11 +403,14 @@ async def main():
     print_section("Test Selection")
     test_choice = select_test()
     
+    # Get custom ports if needed
+    custom_ports = get_custom_ports(test_choice)
+    
     # Create dynamic config
-    config_path = create_dynamic_config(gpu_ip, test_choice)
+    config_path = create_dynamic_config(gpu_ip, test_choice, custom_ports)
     
     # Verify connectivity
-    verify_connectivity(gpu_ip, test_choice)
+    verify_connectivity(gpu_ip, test_choice, custom_ports)
     
     # Display summary
     display_summary(gpu_ip, webui_ip, test_choice, config_path)
