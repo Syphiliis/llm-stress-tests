@@ -106,8 +106,70 @@ workload:
   scenario: "dual_warfare"
 ```
 
-## Remote Testing
-For testing a remote GPU server (e.g., from a VPS), use the provided wrapper script:
+## Interactive CLI
+
+For the easiest way to run tests on different VPS instances, use the interactive CLI:
+
+```bash
+python cli.py
+```
+
+The CLI will guide you through:
+1. **GPU Server Configuration**: Enter the IP address of your GPU server
+2. **Open WebUI VPS Configuration**: Enter the IP address of your Open WebUI VPS
+3. **Test Selection**: Choose from available test configurations:
+   - Flash Only (port 38703)
+   - Thinker Only (port 38704)
+   - Dual Warfare (both models, 50/50 split)
+   - Mixed Warfare (weighted distribution)
+   - Custom Config (specify your own config file)
+4. **Connectivity Check**: Automatic verification of server reachability
+5. **Confirmation**: Review configuration before starting the test
+
+### Example Session
+
+```text
+============================================================
+  LLM Stress Test - Interactive CLI
+============================================================
+
+▶ GPU Server Configuration
+Enter GPU server IP address [24.124.32.70]: 
+
+▶ Open WebUI VPS Configuration
+Enter Open WebUI VPS IP address [127.0.0.1]: 192.168.1.100
+
+▶ Available Test Configurations
+  1. Flash Only
+     Heavy load on Flash model only (faster, lighter model)
+  2. Thinker Only
+     Heavy load on Thinker model only (slower, more powerful model)
+  3. Dual Warfare
+     Test Flash and Thinker simultaneously (50/50 split)
+  4. Mixed Warfare
+     Mixed load with weighted distribution (30/70 split)
+  5. Custom Config
+     Specify your own config file
+
+Select test configuration (1-5) [1]: 3
+
+▶ Connectivity Check
+  Checking 24.124.32.70:38703... ✓ Reachable
+  Checking 24.124.32.70:38704... ✓ Reachable
+
+▶ Test Configuration Summary
+  Test Type: Dual Warfare
+  GPU Server: 24.124.32.70
+  WebUI VPS: 192.168.1.100
+  Config File: /tmp/llm_stress_test_3.yaml
+
+✓ Configuration ready
+
+Start the test? (y/n) [y]: 
+```
+
+## Remote Testing (Legacy)
+For testing a remote GPU server (e.g., from a VPS), you can also use the provided wrapper script:
 
 ```bash
 ./run_remote.sh
