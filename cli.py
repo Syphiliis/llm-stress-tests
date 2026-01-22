@@ -187,7 +187,16 @@ def get_custom_ports(test_choice):
                     except ValueError:
                         print(f"{Fore.RED}✗ Invalid port number{Style.RESET_ALL}")
             return ports
-        return default_ports
+    return default_ports
+
+
+def get_duration_override_seconds():
+    """Ask user if they want to force 20 min duration"""
+    print_section("Duration Override")
+    choice = get_input("Force duration to 20 minutes (1200s)? (y/n)", "n").lower()
+    if choice == "y":
+        return 1200
+    return None
 
 
 def check_dependencies():
@@ -256,7 +265,7 @@ def select_test():
             print(f"{Fore.RED}✗ Invalid choice. Please select 1-6.{Style.RESET_ALL}")
 
 
-def create_dynamic_config(gpu_ip, test_choice, custom_ports=None):
+def create_dynamic_config(gpu_ip, test_choice, custom_ports=None, duration_override_seconds=None):
     """Create a temporary config file with user-specified IPs and ports"""
     config_info = TEST_CONFIGS[test_choice]
     
@@ -266,7 +275,22 @@ def create_dynamic_config(gpu_ip, test_choice, custom_ports=None):
         if not os.path.exists(custom_path):
             print(f"{Fore.RED}✗ Config file not found: {custom_path}{Style.RESET_ALL}")
             sys.exit(1)
-        return custom_path
+        if not duration_override_seconds:
+            return custom_path
+        # Create a temp copy with overridden duration to avoid mutating user file
+        try:
+            with open(custom_path, "r") as f:
+                config = yaml.safe_load(f)
+        except Exception as e:
+            print(f"{Fore.RED}✗ Error loading config: {e}{Style.RESET_ALL}")
+            sys.exit(1)
+        if "workload" in config:
+            config["workload"]["duration_seconds"] = duration_override_seconds
+        temp_dir = tempfile.gettempdir()
+        temp_config_path = os.path.join(temp_dir, f"llm_stress_test_{test_choice}.yaml")
+        with open(temp_config_path, "w") as f:
+            yaml.dump(config, f, default_flow_style=False)
+        return temp_config_path
     
     # Load the template config
     template_path = config_info["file"]
@@ -292,6 +316,10 @@ def create_dynamic_config(gpu_ip, test_choice, custom_ports=None):
                     port = ports[i]
                     server["base_url"] = f"http://{gpu_ip}:{port}/completion"
     
+    # Apply duration override if requested
+    if duration_override_seconds and "workload" in config:
+        config["workload"]["duration_seconds"] = duration_override_seconds
+
     # Create temporary config file
     temp_dir = tempfile.gettempdir()
     temp_config_path = os.path.join(temp_dir, f"llm_stress_test_{test_choice}.yaml")
@@ -350,6 +378,14 @@ def display_summary(gpu_ip, webui_ip, test_choice, config_path):
     print(f"  {Fore.WHITE}GPU Server:{Style.RESET_ALL} {gpu_ip}")
     print(f"  {Fore.WHITE}WebUI VPS:{Style.RESET_ALL} {webui_ip}")
     print(f"  {Fore.WHITE}Config File:{Style.RESET_ALL} {config_path}")
+    try:
+        with open(config_path, "r") as f:
+            cfg = yaml.safe_load(f)
+            duration = cfg.get("workload", {}).get("duration_seconds")
+            if duration:
+                print(f"  {Fore.WHITE}Duration:{Style.RESET_ALL} {duration}s")
+    except Exception:
+        pass
     
     print(f"\n{Fore.GREEN}✓ Configuration ready{Style.RESET_ALL}")
 
@@ -547,9 +583,17 @@ async def main():
     
     # Get custom ports if needed
     custom_ports = get_custom_ports(test_choice)
+
+    # Optional duration override
+    duration_override_seconds = get_duration_override_seconds()
     
     # Create dynamic config
-    config_path = create_dynamic_config(gpu_ip, test_choice, custom_ports)
+    config_path = create_dynamic_config(
+        gpu_ip,
+        test_choice,
+        custom_ports,
+        duration_override_seconds=duration_override_seconds
+    )
     
     # Verify connectivity
     verify_connectivity(gpu_ip, test_choice, custom_ports)
