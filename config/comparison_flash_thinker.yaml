@@ -1,0 +1,49 @@
+servers:
+  - name: "flash"
+    base_url: "http://24.124.32.70:38703/completion"
+    model_alias: "flash"
+  - name: "thinker"
+    base_url: "http://24.124.32.70:38705/completion"
+    model_alias: "thinker"
+
+comparison_mode: true
+
+workload:
+  users: 20
+  duration_seconds: 1200   # 20 minutes per run
+  ramp_up_seconds: 120
+  iterations: 2            # back-to-back runs for stability drift detection
+  seed: 42
+
+prompts:
+  min_tokens: 256
+  max_tokens: 2048
+  prefix: "Stress test: "
+  strategy: staged
+  stages:
+    - tokens: 256
+      duration_seconds: 300   # 5 min
+    - tokens: 512
+      duration_seconds: 300
+    - tokens: 1024
+      duration_seconds: 300
+    - tokens: 2048
+      duration_seconds: 300
+
+client:
+  timeout_seconds: 240
+  connect_timeout: 60
+  retries: 3
+  backoff_factor: 2.0
+
+prometheus:
+  enabled: false
+
+ping:
+  enabled: true
+  interval_seconds: 120
+  count: 4
+
+system:
+  enabled: true
+  interval_seconds: 20

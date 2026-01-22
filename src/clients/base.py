@@ -11,7 +11,8 @@ class BaseLLMClient(ABC):
         session: aiohttp.ClientSession,
         prompt: str,
         max_tokens: int,
-        client_config: ClientConfig
+        client_config: ClientConfig,
+        input_tokens: int = 0
     ) -> RequestMetrics:
         """
         Send a request to the LLM backend.

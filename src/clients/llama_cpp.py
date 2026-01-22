@@ -21,7 +21,8 @@ class LlamaCppClient(BaseLLMClient):
         session: aiohttp.ClientSession,
         prompt: str,
         max_tokens: int,
-        client_config: ClientConfig
+        client_config: ClientConfig,
+        input_tokens: int = 0
     ) -> RequestMetrics:
         req_id = str(uuid.uuid4())
         start_time = time.time()
@@ -113,6 +114,7 @@ class LlamaCppClient(BaseLLMClient):
             end_time=end_time,
             ttft=ttft,
             output_tokens=output_tokens,
+            input_tokens=input_tokens,
             error=error,
             endpoint=endpoint_name
         )

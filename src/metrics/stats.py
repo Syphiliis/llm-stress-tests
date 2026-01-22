@@ -105,6 +105,10 @@ class RequestMetrics:
     end_time: float = 0.0
     ttft: float = 0.0  # Time to first token
     output_tokens: int = 0
+    input_tokens: int = 0
+    queue_wait: float = 0.0
+    concurrency: int = 0
+    user_id: Optional[int] = None
     error: Optional[str] = None
     endpoint: Optional[str] = None  # Track which endpoint was used (for mixed warfare)
 
@@ -120,6 +124,12 @@ class RequestMetrics:
         if duration <= 0 or self.output_tokens == 0:
             return 0.0
         return self.output_tokens / duration
+
+    @property
+    def latency_per_token(self) -> float:
+        if self.output_tokens <= 0:
+            return 0.0
+        return self.latency_seconds / self.output_tokens
     
     @property
     def error_category(self) -> Optional[ErrorCategory]:
@@ -166,6 +176,18 @@ class TestSummary:
     # Reliability flag: True if 100% failure rate
     is_failed: bool = False
 
+    # Extra diagnostics
+    queue_wait_p50: Optional[float] = None
+    queue_wait_p90: Optional[float] = None
+    per_request_tps_p50: Optional[float] = None
+    per_request_tps_p90: Optional[float] = None
+    per_user_throughput: Optional[Dict[str, float]] = None  # tokens/sec per user id
+    latency_per_token_mean: Optional[float] = None
+    latency_per_token_p90: Optional[float] = None
+    latency_slope_vs_input: Optional[float] = None
+    tokens_vs_concurrency: Optional[Dict[str, float]] = None
+    stability_score: Optional[float] = None
+
 class StatsCalculator:
     def __init__(self):
         self.metrics: List[RequestMetrics] = []
@@ -178,7 +200,12 @@ class StatsCalculator:
         self._last_snapshot_errors = 0
 
     def start_test(self):
+        self.metrics = []
         self.start_time = time.time()
+        self.end_time = 0.0
+        self._last_snapshot_count = 0
+        self._last_snapshot_tokens = 0
+        self._last_snapshot_errors = 0
 
     def stop_test(self):
         self.end_time = time.time()
@@ -207,7 +234,37 @@ class StatsCalculator:
         # Extract raw data for calculations
         ttfts = [m.ttft for m in successful] if successful else []
         latencies = [m.latency_seconds for m in successful] if successful else []
-        
+        queue_waits = [m.queue_wait for m in self.metrics if m.queue_wait > 0]
+        per_request_tps = [m.tokens_per_second for m in successful if m.tokens_per_second > 0]
+        latency_per_token = [m.latency_per_token for m in successful if m.latency_per_token > 0]
+
+        per_user_totals: Dict[str, int] = {}
+        for m in successful:
+            uid = str(m.user_id) if m.user_id is not None else "unknown"
+            per_user_totals.setdefault(uid, 0)
+            per_user_totals[uid] += m.output_tokens
+
+        per_user_throughput = None
+        if per_user_totals and total_duration > 0:
+            per_user_throughput = {uid: tokens / total_duration for uid, tokens in per_user_totals.items()}
+
+        latency_slope = None
+        slope_samples = [(m.input_tokens, m.latency_seconds) for m in successful if m.input_tokens > 0]
+        if len(slope_samples) >= 2:
+            try:
+                xs, ys = zip(*slope_samples)
+                latency_slope = float(np.polyfit(xs, ys, 1)[0])
+            except Exception:
+                latency_slope = None
+
+        tokens_vs_concurrency = None
+        if successful:
+            buckets: Dict[str, List[float]] = {}
+            for m in successful:
+                label = str(m.concurrency) if m.concurrency else "unknown"
+                buckets.setdefault(label, []).append(m.tokens_per_second)
+            tokens_vs_concurrency = {k: safe_mean(v) for k, v in buckets.items()}
+    
         # Calculate error breakdown by category
         error_breakdown: Dict[str, int] = {
             ErrorCategory.TIMEOUT.value: 0,
@@ -222,6 +279,9 @@ class StatsCalculator:
         
         # Check if test completely failed
         is_failed = len(self.metrics) > 0 and len(successful) == 0
+        error_rate = (len(failed) / len(self.metrics)) if self.metrics else 0.0
+        latency_cv = (safe_stdev(latencies) or 0.0) / (safe_mean(latencies) or 1.0)
+        stability_score = max(0.0, 1.0 - (error_rate * 1.5 + latency_cv * 0.5))
 
         return TestSummary(
             total_requests=len(self.metrics),
@@ -245,7 +305,17 @@ class StatsCalculator:
             latency_stdev=safe_stdev(latencies),
             # Error breakdown
             error_breakdown=error_breakdown if failed else None,
-            is_failed=is_failed
+            is_failed=is_failed,
+            queue_wait_p50=safe_percentile(queue_waits, 50),
+            queue_wait_p90=safe_percentile(queue_waits, 90),
+            per_request_tps_p50=safe_percentile(per_request_tps, 50),
+            per_request_tps_p90=safe_percentile(per_request_tps, 90),
+            per_user_throughput=per_user_throughput,
+            latency_per_token_mean=safe_mean(latency_per_token),
+            latency_per_token_p90=safe_percentile(latency_per_token, 90),
+            latency_slope_vs_input=latency_slope,
+            tokens_vs_concurrency=tokens_vs_concurrency,
+            stability_score=stability_score
         )
 
     def analyze_results(self, summary: TestSummary) -> List[str]:
@@ -306,6 +376,22 @@ class StatsCalculator:
                 verdicts.append(f"WARNING: High latency jitter (CV={cv:.2f}). Inconsistent response times.")
             elif cv > 0.3:
                 verdicts.append(f"INFO: Moderate latency jitter (CV={cv:.2f}).")
+
+        # 5. Queue wait time
+        if summary.queue_wait_p90 is not None:
+            if summary.queue_wait_p90 > 1.0:
+                verdicts.append(f"WARNING: Queue wait time is high (P90 {summary.queue_wait_p90:.2f}s) indicating contention.")
+            elif summary.queue_wait_p90 > 0.2:
+                verdicts.append(f"INFO: Queue wait is noticeable (P90 {summary.queue_wait_p90:.2f}s).")
+
+        # 6. Stability score
+        if summary.stability_score is not None:
+            if summary.stability_score < 0.4:
+                verdicts.append(f"CRITICAL: Stability score very low ({summary.stability_score:.2f}). System is unstable under load.")
+            elif summary.stability_score < 0.7:
+                verdicts.append(f"WARNING: Stability score is degraded ({summary.stability_score:.2f}).")
+            else:
+                verdicts.append(f"PASS: Stability score is healthy ({summary.stability_score:.2f}).")
 
         return verdicts
 

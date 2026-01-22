@@ -3,17 +3,22 @@ import time
 import logging
 import os
 import json
+import csv
 from datetime import datetime as dt
 from typing import List, Optional
 import aiohttp
 from colorama import Fore
+from urllib.parse import urlparse
 
 from src.config.schema import GlobalConfig
 from src.metrics.stats import StatsCalculator, TestSummary
 from src.generators.prompt_factory import PromptFactory
+from src.generators.token_scheduler import TokenScheduler
 from src.clients.base import BaseLLMClient
 from src.clients.llama_cpp import LlamaCppClient
 from src.clients.composite import WeightedCompositeClient
+from src.metrics.network import PingMonitor
+from src.metrics.system_sampler import SystemSampler
 
 try:
     from src.metrics.prometheus_exporter import PrometheusExporter
@@ -23,6 +28,72 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 class LoadTestOrchestrator:
+    CSV_COLUMNS = [
+        "record_type",
+        "run_id",
+        "ts",
+        "label",
+        "model",
+        "iteration",
+        "request_id",
+        "endpoint",
+        "user_id",
+        "start_ts",
+        "end_ts",
+        "ttft",
+        "latency",
+        "queue_wait",
+        "concurrency",
+        "input_tokens",
+        "output_tokens",
+        "tps",
+        "latency_per_token",
+        "error",
+        "error_category",
+        "ping_min_ms",
+        "ping_avg_ms",
+        "ping_max_ms",
+        "ping_loss_pct",
+        "cpu_avg",
+        "cpu_per_core",
+        "ram_used_mb",
+        "ram_percent",
+        "gpu",
+        "metric_name",
+        "metric_value",
+        "metric_p50",
+        "metric_p90",
+        "metric_p99",
+        "count",
+        "input_bucket",
+        "summary_total_requests",
+        "summary_successful_requests",
+        "summary_failed_requests",
+        "summary_duration_seconds",
+        "summary_total_tokens",
+        "summary_rps",
+        "summary_tps",
+        "summary_latency_p50",
+        "summary_latency_p90",
+        "summary_latency_p99",
+        "summary_ttft_p50",
+        "summary_ttft_p90",
+        "summary_ttft_p99",
+        "summary_queue_wait_p50",
+        "summary_queue_wait_p90",
+        "summary_per_request_tps_p50",
+        "summary_per_request_tps_p90",
+        "summary_latency_per_token_mean",
+        "summary_latency_per_token_p90",
+        "summary_latency_slope_vs_input",
+        "summary_stability_score",
+        "summary_error_breakdown",
+        "summary_per_user_throughput",
+        "summary_tokens_vs_concurrency",
+        "bottleneck_hint",
+        "config_json",
+    ]
+
     def __init__(self, config: GlobalConfig):
         self.config = config
         self.stats = StatsCalculator()
@@ -37,9 +108,31 @@ class LoadTestOrchestrator:
             max_tokens=config.prompts.max_tokens,
             prefix=config.prompts.prefix
         )
+        self.token_scheduler = TokenScheduler(config.prompts, config.workload.duration_seconds)
 
         # Initialize Client
         self.client = self._build_client()
+        self.ping_monitor: Optional[PingMonitor] = None
+        self.system_sampler: Optional[SystemSampler] = None
+
+        try:
+            first_server = self.config.get_servers()[0]
+            parsed = urlparse(first_server.base_url)
+            self.ping_host = parsed.hostname
+        except Exception:
+            self.ping_host = None
+
+        if config.ping.enabled and self.ping_host:
+            self.ping_monitor = PingMonitor(
+                host=self.ping_host,
+                count=config.ping.count,
+                interval_seconds=config.ping.interval_seconds
+            )
+        if config.system.enabled:
+            self.system_sampler = SystemSampler(
+                interval_seconds=config.system.interval_seconds,
+                gpu_command=config.system.gpu_command
+            )
 
         # Initialize Prometheus
         self.prom_exporter = None
@@ -67,22 +160,30 @@ class LoadTestOrchestrator:
                 weighted_clients.append((client, s.weight))
             return WeightedCompositeClient(weighted_clients)
 
-    async def _user_session(self, session: aiohttp.ClientSession, end_time: float):
+    async def _user_session(self, session: aiohttp.ClientSession, end_time: float, user_id: int):
         async with self.active_users_lock:
             self.active_users_count += 1
         
         try:
             while time.time() < end_time and not self.stop_event.is_set():
-                prompt = self.prompt_factory.generate_prompt()
+                elapsed = time.time() - self.stats.start_time
+                target_tokens = self.token_scheduler.target_tokens(elapsed)
+                input_tokens, prompt = self.prompt_factory.generate_prompt_with_size(target_tokens)
+                async with self.active_users_lock:
+                    current_active = self.active_users_count
                 
                 # Send request
+                scheduled_time = time.time()
                 metric = await self.client.send_request(
                     session, 
                     prompt, 
                     self.config.prompts.max_tokens, 
-                    self.config.client
+                    self.config.client,
+                    input_tokens=input_tokens
                 )
-                
+                metric.queue_wait = metric.start_time - scheduled_time
+                metric.concurrency = current_active
+                metric.user_id = user_id
                 self.stats.add_metric(metric)
                 # Optional think time could go here
         finally:
@@ -155,6 +256,11 @@ class LoadTestOrchestrator:
             print(f"{Fore.CYAN}Target: {self.config.server.base_url}")
 
         self.stats.start_test()
+        if self.ping_monitor:
+            await self.ping_monitor.run_once()  # baseline before load
+            self.ping_monitor.start()
+        if self.system_sampler:
+            self.system_sampler.start()
         
         # Configure overall client timeout
         timeout = aiohttp.ClientTimeout(
@@ -174,76 +280,168 @@ class LoadTestOrchestrator:
             if ramp_up > 0:
                 delay = ramp_up / users
                 for i in range(users):
-                    tasks.append(asyncio.create_task(self._user_session(session, end_time)))
+                    tasks.append(asyncio.create_task(self._user_session(session, end_time, user_id=i + 1)))
                     if i < users - 1:
                         await asyncio.sleep(delay)
             else:
-                for _ in range(users):
-                    tasks.append(asyncio.create_task(self._user_session(session, end_time)))
+                for i in range(users):
+                    tasks.append(asyncio.create_task(self._user_session(session, end_time, user_id=i + 1)))
             
             await asyncio.gather(*tasks)
 
         self.stats.stop_test()
+        if self.ping_monitor:
+            await self.ping_monitor.stop()
+        if self.system_sampler:
+            await self.system_sampler.stop()
         return self.stats
 
-    def save_report(self, output_dir: str):
+    def save_report(
+        self,
+        output_dir: str,
+        label: Optional[str] = None,
+        csv_path: Optional[str] = None,
+        include_header: bool = True,
+        run_id: Optional[str] = None,
+        iteration: Optional[int] = None
+    ):
         summary = self.stats.calculate_summary()
         timestamp = dt.now().strftime("%Y%m%d_%H%M%S")
+        suffix = f"_{label}" if label else ""
+        model_name = self.config.server.name if self.config.server else "default"
+        run_id = run_id or f"{model_name}_{timestamp}{suffix}"
         
         # Print Console Summary
         self._print_summary(summary)
         
-        # Save JSON with enhanced metrics
         detailed_metrics = [
             {
+                "record_type": "request",
+                "run_id": run_id,
+                "ts": m.start_time,
+                "label": label,
+                "model": model_name,
+                "iteration": iteration,
                 "request_id": m.request_id,
                 "endpoint": m.endpoint,
+                "user_id": m.user_id,
                 "start_ts": m.start_time,
                 "end_ts": m.end_time,
                 "ttft": m.ttft,
                 "latency": m.latency_seconds,
+                "queue_wait": m.queue_wait,
+                "concurrency": m.concurrency,
+                "input_tokens": m.input_tokens,
                 "output_tokens": m.output_tokens,
                 "tps": m.tokens_per_second,
+                "latency_per_token": m.latency_per_token,
                 "error": m.error,
                 "error_category": m.error_category.value if m.error_category else None
             }
             for m in self.stats.metrics
         ]
-        
-        json_path = os.path.join(output_dir, f"test_run_{timestamp}.json")
+
+        bottleneck_hint = self._infer_bottleneck(summary)
+
+        summary_row = {
+            "record_type": "summary",
+            "run_id": run_id,
+            "ts": time.time(),
+            "label": label,
+            "model": model_name,
+            "iteration": iteration,
+            "summary_total_requests": summary.total_requests,
+            "summary_successful_requests": summary.successful_requests,
+            "summary_failed_requests": summary.failed_requests,
+            "summary_duration_seconds": summary.total_duration,
+            "summary_total_tokens": summary.total_tokens,
+            "summary_rps": summary.rps,
+            "summary_tps": summary.global_throughput_tokens_per_sec,
+            "summary_latency_p50": summary.latency_p50,
+            "summary_latency_p90": summary.latency_p90,
+            "summary_latency_p99": summary.latency_p99,
+            "summary_ttft_p50": summary.ttft_p50,
+            "summary_ttft_p90": summary.ttft_p90,
+            "summary_ttft_p99": summary.ttft_p99,
+            "summary_queue_wait_p50": summary.queue_wait_p50,
+            "summary_queue_wait_p90": summary.queue_wait_p90,
+            "summary_per_request_tps_p50": summary.per_request_tps_p50,
+            "summary_per_request_tps_p90": summary.per_request_tps_p90,
+            "summary_latency_per_token_mean": summary.latency_per_token_mean,
+            "summary_latency_per_token_p90": summary.latency_per_token_p90,
+            "summary_latency_slope_vs_input": summary.latency_slope_vs_input,
+            "summary_stability_score": summary.stability_score,
+            "summary_error_breakdown": json.dumps(summary.error_breakdown) if summary.error_breakdown else None,
+            "summary_per_user_throughput": json.dumps(summary.per_user_throughput) if summary.per_user_throughput else None,
+            "summary_tokens_vs_concurrency": json.dumps(summary.tokens_vs_concurrency) if summary.tokens_vs_concurrency else None,
+            "bottleneck_hint": bottleneck_hint,
+        }
+
+        config_row = {
+            "record_type": "config",
+            "run_id": run_id,
+            "ts": time.time(),
+            "label": label,
+            "model": model_name,
+            "iteration": iteration,
+            "config_json": json.dumps(self.config.model_dump()),
+        }
+
+        ping_rows = []
+        if self.ping_monitor and self.ping_monitor.samples:
+            for s in self.ping_monitor.samples:
+                ping_rows.append({
+                    "record_type": "ping",
+                    "run_id": run_id,
+                    "ts": s.get("ts"),
+                    "label": label,
+                    "model": model_name,
+                    "iteration": iteration,
+                    "ping_min_ms": s.get("min_ms"),
+                    "ping_avg_ms": s.get("avg_ms"),
+                    "ping_max_ms": s.get("max_ms"),
+                    "ping_loss_pct": s.get("loss_pct"),
+                })
+
+        system_rows = []
+        if self.system_sampler and self.system_sampler.snapshots:
+            for s in self.system_sampler.snapshots:
+                system_rows.append({
+                    "record_type": "system",
+                    "run_id": run_id,
+                    "ts": s.get("ts"),
+                    "label": label,
+                    "model": model_name,
+                    "iteration": iteration,
+                    "cpu_avg": s.get("cpu_avg"),
+                    "cpu_per_core": json.dumps(s.get("cpu_per_core")),
+                    "ram_used_mb": s.get("ram_used_mb"),
+                    "ram_percent": s.get("ram_percent"),
+                    "gpu": json.dumps(s.get("gpu")),
+                })
+
+        ttft_rows = self._ttft_vs_input_rows(run_id, label, model_name, iteration)
+        tokens_vs_conc_rows = self._tokens_vs_concurrency_rows(run_id, label, model_name, iteration)
+        reactivity_rows = self._reactivity_rows(run_id, label, model_name, iteration)
+        per_user_rows = self._per_user_tps_rows(run_id, label, model_name, iteration)
+
+        combined_rows = (
+            detailed_metrics
+            + [summary_row, config_row]
+            + ping_rows
+            + system_rows
+            + ttft_rows
+            + tokens_vs_conc_rows
+            + reactivity_rows
+            + per_user_rows
+        )
+
+        csv_path = csv_path or os.path.join(output_dir, f"test_run_{timestamp}{suffix}.csv")
         try:
-            with open(json_path, "w") as f:
-                json.dump({
-                    "config": self.config.model_dump(),
-                    "summary": {
-                        "total_requests": summary.total_requests,
-                        "successful_requests": summary.successful_requests,
-                        "failed_requests": summary.failed_requests,
-                        "is_failed": summary.is_failed,
-                        "duration_seconds": summary.total_duration,
-                        "total_tokens": summary.total_tokens,
-                        "rps": summary.rps,
-                        "tps": summary.global_throughput_tokens_per_sec,
-                        # Latency metrics (null for N/A)
-                        "latency_p50": summary.latency_p50,
-                        "latency_p90": summary.latency_p90,
-                        "latency_p99": summary.latency_p99,
-                        "latency_mean": summary.latency_mean,
-                        "latency_stdev": summary.latency_stdev,
-                        # TTFT metrics (null for N/A)
-                        "ttft_p50": summary.ttft_p50,
-                        "ttft_p90": summary.ttft_p90,
-                        "ttft_p99": summary.ttft_p99,
-                        "ttft_mean": summary.ttft_mean,
-                        "ttft_stdev": summary.ttft_stdev,
-                        # Error breakdown
-                        "error_breakdown": summary.error_breakdown
-                    }, 
-                    "details": detailed_metrics
-                }, f, indent=2)
-            print(f"\n{Fore.BLUE}Detailed logs saved to: {json_path}")
+            self._write_combined_csv(csv_path, combined_rows, include_header=include_header)
+            print(f"{Fore.BLUE}Combined CSV saved to: {csv_path}")
         except Exception as e:
-            logger.error(f"Failed to save JSON report: {e}")
+            logger.error(f"Failed to save combined CSV: {e}")
 
         # Final Prometheus Push (handle Optional values)
         if self.prom_exporter:
@@ -280,6 +478,203 @@ class LoadTestOrchestrator:
                 logger.info("Final test summary pushed to Prometheus")
             except Exception as e:
                 logger.error(f"Failed to push final summary: {e}")
+
+    def _write_combined_csv(self, path: str, rows: List[dict], include_header: bool = True):
+        if not rows:
+            return
+        with open(path, "a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=self.CSV_COLUMNS)
+            if include_header:
+                writer.writeheader()
+            for row in rows:
+                writer.writerow(row)
+
+    def _ttft_vs_input_rows(self, run_id: str, label: Optional[str], model_name: str, iteration: Optional[int]) -> List[dict]:
+        bucket_size = 256
+        if self.config.prompts.stages:
+            min_stage = min(s.tokens for s in self.config.prompts.stages)
+            if min_stage > 0:
+                bucket_size = min_stage
+
+        buckets = {}
+        for m in self.stats.metrics:
+            if m.error or m.input_tokens <= 0:
+                continue
+            bucket = int(m.input_tokens / bucket_size) * bucket_size
+            buckets.setdefault(bucket, []).append(m.ttft)
+
+        rows = []
+        from src.metrics.stats import safe_percentile
+        for bucket, values in sorted(buckets.items()):
+            rows.append({
+                "record_type": "ttft_vs_input",
+                "run_id": run_id,
+                "ts": time.time(),
+                "label": label,
+                "model": model_name,
+                "iteration": iteration,
+                "input_bucket": bucket,
+                "metric_name": "ttft",
+                "metric_p50": safe_percentile(values, 50),
+                "metric_p90": safe_percentile(values, 90),
+                "metric_p99": safe_percentile(values, 99),
+                "count": len(values)
+            })
+        return rows
+
+    def _tokens_vs_concurrency_rows(self, run_id: str, label: Optional[str], model_name: str, iteration: Optional[int]) -> List[dict]:
+        rows = []
+        if not self.stats.metrics:
+            return rows
+        buckets = {}
+        for m in self.stats.metrics:
+            if m.error or m.concurrency <= 0:
+                continue
+            buckets.setdefault(m.concurrency, []).append(m.tokens_per_second)
+        from src.metrics.stats import safe_mean
+        for conc, values in sorted(buckets.items()):
+            rows.append({
+                "record_type": "tokens_vs_concurrency",
+                "run_id": run_id,
+                "ts": time.time(),
+                "label": label,
+                "model": model_name,
+                "iteration": iteration,
+                "concurrency": conc,
+                "metric_name": "tps",
+                "metric_value": safe_mean(values),
+                "count": len(values)
+            })
+        return rows
+
+    def _reactivity_rows(self, run_id: str, label: Optional[str], model_name: str, iteration: Optional[int]) -> List[dict]:
+        successful = [m for m in self.stats.metrics if m.error is None]
+        if len(successful) < 2:
+            return []
+
+        successful.sort(key=lambda m: m.start_time)
+        window = max(1, int(len(successful) * 0.1))
+        first = successful[:window]
+        last = successful[-window:]
+
+        from src.metrics.stats import safe_percentile
+        ttft_initial = safe_percentile([m.ttft for m in first], 50)
+        ttft_final = safe_percentile([m.ttft for m in last], 50)
+
+        rows = [
+            {
+                "record_type": "reactivity",
+                "run_id": run_id,
+                "ts": time.time(),
+                "label": label,
+                "model": model_name,
+                "iteration": iteration,
+                "metric_name": "ttft_p50_initial",
+                "metric_value": ttft_initial,
+            },
+            {
+                "record_type": "reactivity",
+                "run_id": run_id,
+                "ts": time.time(),
+                "label": label,
+                "model": model_name,
+                "iteration": iteration,
+                "metric_name": "ttft_p50_final",
+                "metric_value": ttft_final,
+            }
+        ]
+
+        if ttft_initial is not None and ttft_final is not None:
+            rows.append({
+                "record_type": "reactivity",
+                "run_id": run_id,
+                "ts": time.time(),
+                "label": label,
+                "model": model_name,
+                "iteration": iteration,
+                "metric_name": "ttft_p50_delta",
+                "metric_value": ttft_final - ttft_initial,
+            })
+            if ttft_initial > 0:
+                rows.append({
+                    "record_type": "reactivity",
+                    "run_id": run_id,
+                    "ts": time.time(),
+                    "label": label,
+                    "model": model_name,
+                    "iteration": iteration,
+                    "metric_name": "ttft_p50_ratio",
+                    "metric_value": ttft_final / ttft_initial,
+                })
+        return rows
+
+    def _infer_bottleneck(self, summary: TestSummary) -> str:
+        ping_avg = None
+        if self.ping_monitor and self.ping_monitor.samples:
+            avgs = [s.get("avg_ms") for s in self.ping_monitor.samples if s.get("avg_ms") is not None]
+            if avgs:
+                ping_avg = sum(avgs) / len(avgs)
+
+        cpu_avg = None
+        ram_pct = None
+        gpu_util = None
+        if self.system_sampler and self.system_sampler.snapshots:
+            cpu_vals = [s.get("cpu_avg") for s in self.system_sampler.snapshots if s.get("cpu_avg") is not None]
+            ram_vals = [s.get("ram_percent") for s in self.system_sampler.snapshots if s.get("ram_percent") is not None]
+            gpu_vals = []
+            for s in self.system_sampler.snapshots:
+                gpus = s.get("gpu") or []
+                for g in gpus:
+                    if g.get("utilization_gpu") is not None:
+                        gpu_vals.append(g.get("utilization_gpu"))
+            if cpu_vals:
+                cpu_avg = sum(cpu_vals) / len(cpu_vals)
+            if ram_vals:
+                ram_pct = sum(ram_vals) / len(ram_vals)
+            if gpu_vals:
+                gpu_util = sum(gpu_vals) / len(gpu_vals)
+
+        if ping_avg is not None and ping_avg > 100 and summary.ttft_p50 and summary.ttft_p50 > 2.0:
+            return "network"
+        if gpu_util is not None and gpu_util > 90:
+            return "gpu"
+        if cpu_avg is not None and cpu_avg > 90:
+            return "cpu"
+        if ram_pct is not None and ram_pct > 90:
+            return "memory"
+        if summary.queue_wait_p90 is not None and summary.queue_wait_p90 > 1.0:
+            return "client_queue"
+        if summary.latency_slope_vs_input is not None and summary.latency_slope_vs_input > 0.01:
+            return "model_throughput"
+        return "unknown"
+
+    def _per_user_tps_rows(self, run_id: str, label: Optional[str], model_name: str, iteration: Optional[int]) -> List[dict]:
+        if not self.stats.metrics:
+            return []
+        per_user = {}
+        for m in self.stats.metrics:
+            if m.error:
+                continue
+            uid = m.user_id if m.user_id is not None else "unknown"
+            per_user.setdefault(uid, 0)
+            per_user[uid] += m.output_tokens
+        if not per_user or self.stats.start_time <= 0:
+            return []
+        duration = max(1e-6, self.stats.end_time - self.stats.start_time)
+        rows = []
+        for uid, tokens in per_user.items():
+            rows.append({
+                "record_type": "per_user_tps",
+                "run_id": run_id,
+                "ts": time.time(),
+                "label": label,
+                "model": model_name,
+                "iteration": iteration,
+                "user_id": uid,
+                "metric_name": "tps_per_user",
+                "metric_value": tokens / duration,
+            })
+        return rows
 
     def _print_summary(self, summary: TestSummary):
         """
@@ -353,6 +748,31 @@ class LoadTestOrchestrator:
         print(f"P99: {fmt(summary.ttft_p99)}")
         print(f"Mean: {fmt(summary.ttft_mean)}")
         print(f"Stdev (Jitter): {fmt(summary.ttft_stdev)}")
+
+        if summary.queue_wait_p50 is not None:
+            print(f"\n{Fore.YELLOW}=== Queue Wait (s) ===")
+            print(f"P50: {fmt(summary.queue_wait_p50)}")
+            print(f"P90: {fmt(summary.queue_wait_p90)}")
+
+        if summary.per_request_tps_p50 is not None:
+            print(f"\n{Fore.YELLOW}=== Throughput Per Request (tokens/sec) ===")
+            print(f"P50: {fmt(summary.per_request_tps_p50)}")
+            print(f"P90: {fmt(summary.per_request_tps_p90)}")
+
+        if summary.latency_per_token_mean is not None:
+            print(f"\n{Fore.YELLOW}=== Latency Per Token (s/token) ===")
+            print(f"Mean: {fmt(summary.latency_per_token_mean)}")
+            print(f"P90: {fmt(summary.latency_per_token_p90)}")
+
+        if summary.stability_score is not None:
+            print(f"\n{Fore.YELLOW}Stability Score: {fmt(summary.stability_score, decimals=2)} (1.0=perfect, 0=unstable)")
+
+        if summary.tokens_vs_concurrency:
+            print(f"\n{Fore.CYAN}Tokens/sec vs Concurrency:")
+            for conc, tps in sorted(summary.tokens_vs_concurrency.items(), key=lambda x: int(x[0]) if x[0].isdigit() else 9999):
+                if tps is None:
+                    continue
+                print(f"  Concurrency {conc}: {tps:.2f} tok/s")
         
         # Error breakdown
         if summary.error_breakdown and summary.failed_requests > 0:

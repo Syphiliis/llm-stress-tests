@@ -33,7 +33,8 @@ class WeightedCompositeClient(BaseLLMClient):
         session: aiohttp.ClientSession,
         prompt: str,
         max_tokens: int,
-        client_config: ClientConfig
+        client_config: ClientConfig,
+        input_tokens: int = 0
     ) -> RequestMetrics:
         client = self._select_client()
-        return await client.send_request(session, prompt, max_tokens, client_config)
+        return await client.send_request(session, prompt, max_tokens, client_config, input_tokens=input_tokens)
