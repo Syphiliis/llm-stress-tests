@@ -10,6 +10,8 @@ import sys
 import socket
 import yaml
 import tempfile
+from datetime import datetime as dt
+import csv
 from pathlib import Path
 from colorama import init, Fore, Style
 
@@ -51,6 +53,13 @@ TEST_CONFIGS = {
         "file": None,
         "description": "Specify your own config file",
         "single_server": None
+    },
+    "6": {
+        "name": "Flash vs Thinker (Comparison)",
+        "file": "config/comparison_flash_thinker.yaml",
+        "description": "Sequential comparison using identical scenarios",
+        "single_server": False,
+        "ports": [38703, 38704]
     }
 }
 
@@ -191,6 +200,9 @@ def check_dependencies():
         ("colorama", "colorama"),
         ("yaml", "PyYAML")
     ]
+    optional_packages = [
+        ("psutil", "psutil")
+    ]
     
     missing = []
     for module_name, package_name in required_packages:
@@ -209,6 +221,13 @@ def check_dependencies():
         print(f"  pip install -r requirements.txt")
         return False
     
+    for module_name, package_name in optional_packages:
+        try:
+            __import__(module_name)
+            print(f"  {Fore.GREEN}✓{Style.RESET_ALL} {package_name} (optional)")
+        except ImportError:
+            print(f"  {Fore.YELLOW}⚠{Style.RESET_ALL} {package_name} (optional, missing)")
+
     print(f"\n{Fore.GREEN}✓ All dependencies installed{Style.RESET_ALL}")
     return True
 
@@ -230,11 +249,11 @@ def select_test():
     display_test_menu()
     
     while True:
-        choice = get_input("\nSelect test configuration (1-5)", "1")
+        choice = get_input("\nSelect test configuration (1-6)", "1")
         if choice in TEST_CONFIGS:
             return choice
         else:
-            print(f"{Fore.RED}✗ Invalid choice. Please select 1-5.{Style.RESET_ALL}")
+            print(f"{Fore.RED}✗ Invalid choice. Please select 1-6.{Style.RESET_ALL}")
 
 
 def create_dynamic_config(gpu_ip, test_choice, custom_ports=None):
@@ -362,27 +381,150 @@ async def run_test(config_path, output_dir="results"):
         print(f"{Fore.RED}✗ Configuration validation failed: {e}{Style.RESET_ALL}")
         return False
     
+    def validate_config(cfg: GlobalConfig):
+        if cfg.workload.duration_seconds != 1200:
+            logger.warning("duration_seconds != 1200s (20 min). Requirement not enforced by code.")
+        if cfg.workload.iterations < 1:
+            logger.warning("iterations < 1; no consecutive runs will occur.")
+        if cfg.prompts.strategy == "uniform":
+            logger.warning("prompts.strategy is 'uniform'; progressive input sizing is not enabled.")
+        if cfg.prompts.strategy == "staged" and not cfg.prompts.stages:
+            logger.warning("prompts.strategy is 'staged' but stages are empty.")
+        if cfg.prompts.strategy in ("linear", "exponential") and not cfg.prompts.ramp:
+            logger.warning("prompts.strategy is ramped but prompts.ramp is not set; defaulting to min/max.")
+
+    validate_config(config)
+
     # Create output directory
-    os.makedirs(output_dir, exist_ok=True)
-    
-    # Initialize and run orchestrator
-    orchestrator = LoadTestOrchestrator(config)
-    
+    run_ts = dt.now().strftime("%Y%m%d_%H%M%S")
+    base_output = os.path.join(output_dir, run_ts)
+    os.makedirs(base_output, exist_ok=True)
+    combined_csv_path = os.path.join(base_output, "combined_results.csv")
+
+    async def execute_run(conf: GlobalConfig, label: str, run_id: str, iteration: int):
+        orchestrator = LoadTestOrchestrator(conf)
+        try:
+            await orchestrator.run()
+        except KeyboardInterrupt:
+            print(f"\n{Fore.YELLOW}⚠ Test interrupted by user{Style.RESET_ALL}")
+        except Exception as e:
+            print(f"\n{Fore.RED}✗ Test failed: {e}{Style.RESET_ALL}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            orchestrator.save_report(
+                base_output,
+                label=label,
+                csv_path=combined_csv_path,
+                include_header=not os.path.exists(combined_csv_path),
+                run_id=run_id,
+                iteration=iteration
+            )
+        return orchestrator.stats.calculate_summary()
+
+    summaries = []
+    total_iterations = config.workload.iterations
     try:
-        await orchestrator.run()
-        orchestrator.save_report(output_dir)
-        print(f"\n{Fore.GREEN}✓ Test completed successfully{Style.RESET_ALL}")
-        print(f"{Fore.WHITE}Results saved to: {output_dir}{Style.RESET_ALL}")
-        return True
+        for iter_idx in range(total_iterations):
+            iter_label = f"iter{iter_idx + 1}"
+            if config.comparison_mode and config.servers:
+                for server in config.get_servers():
+                    single_config = config.model_copy(update={
+                        "server": server,
+                        "servers": None,
+                        "comparison_mode": False
+                    })
+                    run_id = f"{server.name}_{iter_label}"
+                    summary = await execute_run(
+                        single_config,
+                        label=f"{server.name}_{iter_label}",
+                        run_id=run_id,
+                        iteration=iter_idx + 1
+                    )
+                    summaries.append({"model": server.name, "iteration": iter_idx + 1, "summary": summary})
+            else:
+                model_name = config.server.name if config.server else "default"
+                run_id = f"{model_name}_{iter_label}"
+                summary = await execute_run(
+                    config,
+                    label=iter_label,
+                    run_id=run_id,
+                    iteration=iter_idx + 1
+                )
+                summaries.append({"model": model_name, "iteration": iter_idx + 1, "summary": summary})
     except KeyboardInterrupt:
-        print(f"\n{Fore.YELLOW}⚠ Test interrupted by user{Style.RESET_ALL}")
-        orchestrator.save_report(output_dir)
         return False
-    except Exception as e:
-        print(f"\n{Fore.RED}✗ Test failed: {e}{Style.RESET_ALL}")
-        import traceback
-        traceback.print_exc()
-        return False
+
+    if config.comparison_mode and len(set(s["model"] for s in summaries)) > 1:
+        def mean(values):
+            vals = [v for v in values if v is not None]
+            return sum(vals) / len(vals) if vals else None
+
+        per_model = {}
+        for entry in summaries:
+            model = entry["model"]
+            summ = entry["summary"]
+            per_model.setdefault(model, []).append(summ)
+
+        rows = []
+        for model, sums in per_model.items():
+            rows.append({
+                "record_type": "comparison",
+                "run_id": f"{model}_aggregate",
+                "ts": dt.now().timestamp(),
+                "label": "aggregate",
+                "model": model,
+                "metric_name": "latency_p90_mean",
+                "metric_value": mean([s.latency_p90 for s in sums]),
+            })
+            rows.append({
+                "record_type": "comparison",
+                "run_id": f"{model}_aggregate",
+                "ts": dt.now().timestamp(),
+                "label": "aggregate",
+                "model": model,
+                "metric_name": "ttft_p50_mean",
+                "metric_value": mean([s.ttft_p50 for s in sums]),
+            })
+            rows.append({
+                "record_type": "comparison",
+                "run_id": f"{model}_aggregate",
+                "ts": dt.now().timestamp(),
+                "label": "aggregate",
+                "model": model,
+                "metric_name": "tps_mean",
+                "metric_value": mean([s.global_throughput_tokens_per_sec for s in sums]),
+            })
+            rows.append({
+                "record_type": "comparison",
+                "run_id": f"{model}_aggregate",
+                "ts": dt.now().timestamp(),
+                "label": "aggregate",
+                "model": model,
+                "metric_name": "error_rate_mean",
+                "metric_value": mean([
+                    (s.failed_requests / s.total_requests) if s.total_requests else None
+                    for s in sums
+                ]),
+            })
+            rows.append({
+                "record_type": "comparison",
+                "run_id": f"{model}_aggregate",
+                "ts": dt.now().timestamp(),
+                "label": "aggregate",
+                "model": model,
+                "metric_name": "stability_score_mean",
+                "metric_value": mean([s.stability_score for s in sums]),
+            })
+
+        if rows:
+            with open(combined_csv_path, "a", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=LoadTestOrchestrator.CSV_COLUMNS)
+                writer.writerows(rows)
+
+    print(f"\n{Fore.GREEN}✓ Test completed successfully{Style.RESET_ALL}")
+    print(f"{Fore.WHITE}Results saved to: {combined_csv_path}{Style.RESET_ALL}")
+    return True
 
 
 async def main():

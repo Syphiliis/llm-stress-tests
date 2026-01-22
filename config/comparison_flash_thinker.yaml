@@ -3,7 +3,7 @@ servers:
     base_url: "http://24.124.32.70:38703/completion"
     model_alias: "flash"
   - name: "thinker"
-    base_url: "http://24.124.32.70:38705/completion"
+    base_url: "http://24.124.32.70:38704/completion"
     model_alias: "thinker"
 
 comparison_mode: true
