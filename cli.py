@@ -60,6 +60,13 @@ TEST_CONFIGS = {
         "description": "Sequential comparison using identical scenarios",
         "single_server": False,
         "ports": [38703, 38704]
+    },
+    "7": {
+        "name": "Full Test (Flash then Thinker)",
+        "file": "config/comparison_flash_thinker.yaml",
+        "description": "Complete run: Flash first, then Thinker (same scenario)",
+        "single_server": False,
+        "ports": [38703, 38704]
     }
 }
 
@@ -258,11 +265,11 @@ def select_test():
     display_test_menu()
     
     while True:
-        choice = get_input("\nSelect test configuration (1-6)", "1")
+        choice = get_input("\nSelect test configuration (1-7)", "1")
         if choice in TEST_CONFIGS:
             return choice
         else:
-            print(f"{Fore.RED}✗ Invalid choice. Please select 1-6.{Style.RESET_ALL}")
+            print(f"{Fore.RED}✗ Invalid choice. Please select 1-7.{Style.RESET_ALL}")
 
 
 def create_dynamic_config(gpu_ip, test_choice, custom_ports=None, duration_override_seconds=None):
