@@ -13,7 +13,8 @@ import tempfile
 from datetime import datetime as dt
 import csv
 from pathlib import Path
-from colorama import init, Fore, Style
+
+from src.utils.terminal import Fore, Style, init
 
 # Initialize colorama
 init(autoreset=True)
@@ -283,7 +284,7 @@ def create_dynamic_config(gpu_ip, test_choice, custom_ports=None, duration_overr
             print(f"{Fore.RED}✗ Config file not found: {custom_path}{Style.RESET_ALL}")
             sys.exit(1)
         if not duration_override_seconds:
-            return custom_path
+            return custom_path, False
         # Create a temp copy with overridden duration to avoid mutating user file
         try:
             with open(custom_path, "r") as f:
@@ -297,7 +298,7 @@ def create_dynamic_config(gpu_ip, test_choice, custom_ports=None, duration_overr
         temp_config_path = os.path.join(temp_dir, f"llm_stress_test_{test_choice}.yaml")
         with open(temp_config_path, "w") as f:
             yaml.dump(config, f, default_flow_style=False)
-        return temp_config_path
+        return temp_config_path, True
     
     # Load the template config
     template_path = config_info["file"]
@@ -334,7 +335,7 @@ def create_dynamic_config(gpu_ip, test_choice, custom_ports=None, duration_overr
     with open(temp_config_path, "w") as f:
         yaml.dump(config, f, default_flow_style=False)
     
-    return temp_config_path
+    return temp_config_path, True
 
 
 def verify_connectivity(gpu_ip, test_choice, custom_ports=None):
@@ -435,6 +436,10 @@ async def run_test(config_path, output_dir="results"):
             logger.warning("prompts.strategy is 'staged' but stages are empty.")
         if cfg.prompts.strategy in ("linear", "exponential") and not cfg.prompts.ramp:
             logger.warning("prompts.strategy is ramped but prompts.ramp is not set; defaulting to min/max.")
+        if cfg.workload.mode == "open_loop" and cfg.think_time.enabled:
+            logger.warning("think_time is ignored in open_loop mode.")
+        if cfg.workload.mode == "open_loop" and (cfg.load_profile is None or cfg.load_profile.target_rps is None) and cfg.load_profile and cfg.load_profile.type == "constant":
+            logger.warning("open_loop constant profile without target_rps falls back to workload.users as the request rate.")
 
     validate_config(config)
 
@@ -486,7 +491,7 @@ async def run_test(config_path, output_dir="results"):
                     )
                     summaries.append({"model": server.name, "iteration": iter_idx + 1, "summary": summary})
             else:
-                model_name = config.server.name if config.server else "default"
+                model_name = (config.server or config.get_servers()[0]).name
                 run_id = f"{model_name}_{iter_label}"
                 summary = await execute_run(
                     config,
@@ -595,7 +600,7 @@ async def main():
     duration_override_seconds = get_duration_override_seconds()
     
     # Create dynamic config
-    config_path = create_dynamic_config(
+    config_path, cleanup_temp_config = create_dynamic_config(
         gpu_ip,
         test_choice,
         custom_ports,
@@ -619,7 +624,7 @@ async def main():
     success = await run_test(config_path)
     
     # Cleanup temporary config if needed
-    if config_path.startswith(tempfile.gettempdir()):
+    if cleanup_temp_config:
         try:
             os.remove(config_path)
         except Exception:

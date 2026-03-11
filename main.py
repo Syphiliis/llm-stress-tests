@@ -5,11 +5,11 @@ import logging
 import os
 import json
 import csv
-from colorama import init
 from datetime import datetime as dt
 
 from src.config.schema import GlobalConfig
 from src.engine.orchestrator import LoadTestOrchestrator
+from src.utils.terminal import init
 
 # Initialize colorama
 init(autoreset=True)
@@ -17,7 +17,7 @@ init(autoreset=True)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-async def main():
+async def main() -> int:
     parser = argparse.ArgumentParser(description="LLM Load Testing Tool")
     parser.add_argument("--config", default="config/workload.yaml", help="Path to configuration file")
     parser.add_argument("--output", default="results", help="Directory to save results")
@@ -29,10 +29,10 @@ async def main():
             raw_config = yaml.safe_load(f)
     except FileNotFoundError:
         logger.error(f"Configuration file not found: {args.config}")
-        return
+        return 1
     except yaml.YAMLError as e:
         logger.error(f"Error parsing YAML file: {e}")
-        return
+        return 1
 
     # Validate and Parse Config with Pydantic
     try:
@@ -40,7 +40,7 @@ async def main():
     except Exception as e:
         logger.error(f"Configuration validation failed: {e}")
         # Helpful error message for specific Pydantic errors could go here
-        return
+        return 1
 
     # Create Output Interface
     run_ts = dt.now().strftime("%Y%m%d_%H%M%S")
@@ -59,6 +59,10 @@ async def main():
             logger.warning("prompts.strategy is 'staged' but stages are empty.")
         if cfg.prompts.strategy in ("linear", "exponential") and not cfg.prompts.ramp:
             logger.warning("prompts.strategy is ramped but prompts.ramp is not set; defaulting to min/max.")
+        if cfg.workload.mode == "open_loop" and cfg.think_time.enabled:
+            logger.warning("think_time is ignored in open_loop mode.")
+        if cfg.workload.mode == "open_loop" and (cfg.load_profile is None or cfg.load_profile.target_rps is None) and cfg.load_profile and cfg.load_profile.type == "constant":
+            logger.warning("open_loop constant profile without target_rps falls back to workload.users as the request rate.")
 
     validate_config(config)
 
@@ -106,7 +110,7 @@ async def main():
                 )
                 summaries.append({"model": server.name, "iteration": iter_idx + 1, "summary": summary})
         else:
-            model_name = config.server.name if config.server else "default"
+            model_name = (config.server or config.get_servers()[0]).name
             run_id = f"{model_name}_{iter_label}"
             summary = await execute_run(
                 config,
@@ -186,6 +190,8 @@ async def main():
                 writer = csv.DictWriter(f, fieldnames=LoadTestOrchestrator.CSV_COLUMNS)
                 writer.writerows(rows)
 
+    return 0
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    raise SystemExit(asyncio.run(main()))

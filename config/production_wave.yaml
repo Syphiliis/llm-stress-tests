@@ -1,0 +1,62 @@
+server:
+  name: "Flash"
+  base_url: "http://24.124.32.70:38703/completion"
+  model_alias: "flash-model"
+
+workload:
+  users: 20
+  duration_seconds: 1800
+  mode: hybrid
+  max_in_flight: 96
+  seed: 42
+
+load_profile:
+  type: wave
+  min_users: 20
+  max_users: 120
+  period_seconds: 180
+  shape: triangle
+
+think_time:
+  enabled: true
+  distribution: lognormal
+  mean_seconds: 1.2
+  max_seconds: 8
+  after_error_multiplier: 1.5
+
+prompts:
+  min_tokens: 256
+  max_tokens: 2048
+  prefix: "Stress test: "
+  strategy: staged
+  stages:
+    - tokens: 256
+      duration_seconds: 450
+    - tokens: 512
+      duration_seconds: 450
+    - tokens: 1024
+      duration_seconds: 450
+    - tokens: 2048
+      duration_seconds: 450
+
+client:
+  timeout_seconds: 180
+  connect_timeout: 30
+  retries: 2
+  backoff_factor: 2.0
+
+ping:
+  enabled: true
+  interval_seconds: 60
+  count: 4
+
+system:
+  enabled: true
+  source: ssh
+  ssh_host: "24.124.32.70"
+  ssh_user: "ubuntu"
+  ssh_port: 22
+  interval_seconds: 10
+
+prometheus:
+  enabled: false

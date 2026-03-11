@@ -111,6 +111,10 @@ class RequestMetrics:
     user_id: Optional[int] = None
     error: Optional[str] = None
     endpoint: Optional[str] = None  # Track which endpoint was used (for mixed warfare)
+    target_users: Optional[int] = None
+    target_rps: Optional[float] = None
+    in_flight: int = 0
+    think_time: float = 0.0
 
     @property
     def latency_seconds(self) -> float:
@@ -187,6 +191,10 @@ class TestSummary:
     latency_slope_vs_input: Optional[float] = None
     tokens_vs_concurrency: Optional[Dict[str, float]] = None
     stability_score: Optional[float] = None
+    target_users_mean: Optional[float] = None
+    target_rps_mean: Optional[float] = None
+    max_in_flight: Optional[int] = None
+    think_time_mean: Optional[float] = None
 
 class StatsCalculator:
     def __init__(self):
@@ -237,6 +245,10 @@ class StatsCalculator:
         queue_waits = [m.queue_wait for m in self.metrics if m.queue_wait > 0]
         per_request_tps = [m.tokens_per_second for m in successful if m.tokens_per_second > 0]
         latency_per_token = [m.latency_per_token for m in successful if m.latency_per_token > 0]
+        target_users = [float(m.target_users) for m in self.metrics if m.target_users is not None]
+        target_rps = [m.target_rps for m in self.metrics if m.target_rps is not None]
+        think_times = [m.think_time for m in self.metrics if m.think_time > 0]
+        in_flight_values = [m.in_flight for m in self.metrics if m.in_flight > 0]
 
         per_user_totals: Dict[str, int] = {}
         for m in successful:
@@ -315,7 +327,11 @@ class StatsCalculator:
             latency_per_token_p90=safe_percentile(latency_per_token, 90),
             latency_slope_vs_input=latency_slope,
             tokens_vs_concurrency=tokens_vs_concurrency,
-            stability_score=stability_score
+            stability_score=stability_score,
+            target_users_mean=safe_mean(target_users),
+            target_rps_mean=safe_mean(target_rps),
+            max_in_flight=max(in_flight_values) if in_flight_values else None,
+            think_time_mean=safe_mean(think_times),
         )
 
     def analyze_results(self, summary: TestSummary) -> List[str]:

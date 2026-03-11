@@ -144,34 +144,34 @@ class PrometheusExporter:
             active_users: Current number of active concurrent users
         """
         # Update latency metrics
-        if 'latency_p50' in metrics_snapshot:
+        if metrics_snapshot.get('latency_p50') is not None:
             self.client_lag_p50.set(metrics_snapshot['latency_p50'])
-        if 'latency_p90' in metrics_snapshot:
+        if metrics_snapshot.get('latency_p90') is not None:
             self.client_lag_p90.set(metrics_snapshot['latency_p90'])
-        if 'latency_p99' in metrics_snapshot:
+        if metrics_snapshot.get('latency_p99') is not None:
             self.client_lag_p99.set(metrics_snapshot['latency_p99'])
 
         # Update TTFT metrics
-        if 'ttft_p50' in metrics_snapshot:
+        if metrics_snapshot.get('ttft_p50') is not None:
             self.ttft_p50.set(metrics_snapshot['ttft_p50'])
-        if 'ttft_p90' in metrics_snapshot:
+        if metrics_snapshot.get('ttft_p90') is not None:
             self.ttft_p90.set(metrics_snapshot['ttft_p90'])
-        if 'ttft_p99' in metrics_snapshot:
+        if metrics_snapshot.get('ttft_p99') is not None:
             self.ttft_p99.set(metrics_snapshot['ttft_p99'])
 
         # Update throughput
-        if 'tps' in metrics_snapshot:
+        if metrics_snapshot.get('tps') is not None:
             self.tokens_per_second.set(metrics_snapshot['tps'])
 
         # Update request rate
-        if 'rps' in metrics_snapshot:
+        if metrics_snapshot.get('rps') is not None:
             self.request_rate.set(metrics_snapshot['rps'])
 
         # Update error rates
-        if 'error_rate' in metrics_snapshot:
+        if metrics_snapshot.get('error_rate') is not None:
             self.error_rate.set(metrics_snapshot['error_rate'])
 
-        if 'contention_error_rate' in metrics_snapshot:
+        if metrics_snapshot.get('contention_error_rate') is not None:
             self.contention_error_rate.set(metrics_snapshot['contention_error_rate'])
 
         # Update active users

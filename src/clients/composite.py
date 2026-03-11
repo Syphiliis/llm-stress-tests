@@ -11,10 +11,15 @@ class WeightedCompositeClient(BaseLLMClient):
         Args:
             clients: List of (client, weight) tuples.
         """
+        if not clients:
+            raise ValueError("WeightedCompositeClient requires at least one client.")
+
         self.clients = clients
         
         # Normalize weights
         total_weight = sum(w for _, w in clients)
+        if total_weight <= 0:
+            raise ValueError("The sum of client weights must be greater than zero.")
         self.normalized_clients = [
             (client, w / total_weight) for client, w in clients
         ]

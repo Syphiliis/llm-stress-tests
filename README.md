@@ -1,6 +1,6 @@
 # LLM Stress Test Tool (llama.cpp & Ollama)
 
-A structured, async Python tool designed to stress-test local LLM servers (specifically `llama.cpp` and `Ollama`) equipped with NVIDIA GPUs.
+A structured, async Python tool designed to stress-test local LLM servers (specifically `llama.cpp` and Ollama's `/api/generate` endpoint) equipped with NVIDIA GPUs.
 
 It generates reproducible "noise" prompts to bypass the KV cache, forcing the GPU to re-compute attention for every request, simulating a worst-case load scenario.
 
@@ -9,11 +9,15 @@ It generates reproducible "noise" prompts to bypass the KV cache, forcing the GP
 - **High Concurrency**: Uses `asyncio` and `aiohttp` to simulate multiple users without blocking.
 - **Cache Busting**: Generates deterministic but random "charabia" prompts to prevent KV cache hits.
 - **Multi-Model Warfare**: Test one or multiple models simultaneously to observe resource contention.
+- **Realistic Load Profiles**: Supports `burst`, `spike`, `wave`, `cooldown`, and sequential `composite` profiles.
+- **Multiple Workload Modes**: `closed_loop`, `hybrid`, and `open_loop` with deterministic or Poisson arrivals.
+- **Think Time Simulation**: Fixed, uniform, exponential, or lognormal pauses between user actions.
 - **Precise Metrics**:
     - **TTFT (Time To First Token)**: Reaction speed.
     - **End-to-End Latency**: Total generation time.
     - **Client-Side Throughput**: Effective tokens/sec received.
     - **Jitter (Stdev)**: Latency consistency measurement.
+- **Remote GPU Sampling**: Can collect `nvidia-smi` over SSH when the load generator runs on another host.
 - **Anti-Hallucination Reporting**: Distinguishes "N/A" (no data) from "0.00" (actual zero).
 - **Error Categorization**: Classifies errors as Timeout, HTTP 5xx, Connection Refused, or Other.
 - **Reproducible**: Uses a fixed seed (default `42`) to ensure identical test runs for comparison.
@@ -38,6 +42,71 @@ pip install -r requirements.txt
 
 Edit `config/workload.yaml` to match your environment.
 
+### Workload Modes
+
+- `closed_loop`: Each virtual user waits for its response before sending the next request.
+- `hybrid`: Same user-based flow, but intended for more production-like behavior with think time and dynamic user profiles.
+- `open_loop`: Sends requests at a target rate regardless of model latency. Best for burst/spike validation and saturation testing.
+
+### Load Profiles
+
+The load generator supports:
+
+- `constant`: fixed concurrency or fixed request rate
+- `ramp`: gradual increase or decrease
+- `burst`: recurring short peaks above a baseline
+- `spike`: abrupt short-lived surge
+- `wave`: cyclical load pattern (`sine`, `triangle`, `sawtooth`)
+- `cooldown`: progressive ramp-down after heavy load
+- `composite`: sequence multiple segments in one scenario
+
+Example:
+
+```yaml
+workload:
+  users: 20
+  duration_seconds: 1800
+  mode: open_loop
+  arrival_distribution: poisson
+  max_in_flight: 128
+
+load_profile:
+  type: spike
+  base_rps: 2
+  peak_rps: 20
+  start_at_seconds: 300
+  hold_seconds: 45
+```
+
+### Think Time
+
+```yaml
+think_time:
+  enabled: true
+  distribution: lognormal
+  mean_seconds: 1.2
+  max_seconds: 8
+  after_error_multiplier: 1.5
+```
+
+### Remote GPU Metrics
+
+```yaml
+system:
+  enabled: true
+  source: ssh
+  ssh_host: "24.124.32.70"
+  ssh_user: "ubuntu"
+  ssh_port: 22
+  interval_seconds: 10
+```
+
+Reference scenarios:
+
+- `config/production_wave.yaml`
+- `config/open_loop_spike_poisson.yaml`
+- `config/burst_cooldown.yaml`
+
 ### For llama.cpp (Native)
 ```yaml
 server:
@@ -52,12 +121,15 @@ workload:
 ```
 
 ### For Ollama
-If you are using Ollama, update the `base_url`:
+If you are using Ollama, update the `base_url` and set `model_alias` to the Ollama model name:
 
 ```yaml
 server:
   base_url: "http://localhost:11434/api/generate"
+  model_alias: "qwen2.5:7b"
 ```
+
+The client auto-detects Ollama from the `/api/generate` path and sends the proper request payload (`model`, `prompt`, `stream`, `options.num_predict`).
 
 > **Note**: For Ollama, you might need to ensure the model is loaded before starting the test, as the first request often incurs model loading latency.
 
@@ -123,6 +195,8 @@ The CLI will guide you through:
    - Dual Warfare (both models, 50/50 split)
    - Mixed Warfare (weighted distribution)
    - Custom Config (specify your own config file)
+   - Flash vs Thinker (sequential comparison)
+   - Full Test (Flash then Thinker)
 4. **Connectivity Check**: Automatic verification of server reachability
 5. **Confirmation**: Review configuration before starting the test
 
@@ -151,7 +225,7 @@ Enter Open WebUI VPS IP address [127.0.0.1]: 192.168.1.100
   5. Custom Config
      Specify your own config file
 
-Select test configuration (1-5) [1]: 3
+Select test configuration (1-7) [1]: 3
 
 ▶ Connectivity Check
   Checking 24.124.32.70:38703... ✓ Reachable

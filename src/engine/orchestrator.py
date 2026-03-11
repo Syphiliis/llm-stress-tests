@@ -4,21 +4,24 @@ import logging
 import os
 import json
 import csv
+import random
 from datetime import datetime as dt
-from typing import List, Optional
+from typing import List, Optional, Set
 import aiohttp
-from colorama import Fore
 from urllib.parse import urlparse
 
 from src.config.schema import GlobalConfig
 from src.metrics.stats import StatsCalculator, TestSummary
+from src.engine.load_profile import LoadProfileScheduler, LoadTarget
 from src.generators.prompt_factory import PromptFactory
+from src.generators.think_time import ThinkTimeSampler
 from src.generators.token_scheduler import TokenScheduler
 from src.clients.base import BaseLLMClient
 from src.clients.llama_cpp import LlamaCppClient
 from src.clients.composite import WeightedCompositeClient
 from src.metrics.network import PingMonitor
 from src.metrics.system_sampler import SystemSampler
+from src.utils.terminal import Fore
 
 try:
     from src.metrics.prometheus_exporter import PrometheusExporter
@@ -44,8 +47,12 @@ class LoadTestOrchestrator:
         "latency",
         "queue_wait",
         "concurrency",
+        "target_users",
+        "target_rps",
+        "in_flight",
         "input_tokens",
         "output_tokens",
+        "think_time",
         "tps",
         "latency_per_token",
         "error",
@@ -59,6 +66,7 @@ class LoadTestOrchestrator:
         "ram_used_mb",
         "ram_percent",
         "gpu",
+        "system_source",
         "metric_name",
         "metric_value",
         "metric_p50",
@@ -90,6 +98,10 @@ class LoadTestOrchestrator:
         "summary_error_breakdown",
         "summary_per_user_throughput",
         "summary_tokens_vs_concurrency",
+        "summary_target_users_mean",
+        "summary_target_rps_mean",
+        "summary_max_in_flight",
+        "summary_think_time_mean",
         "bottleneck_hint",
         "config_json",
     ]
@@ -98,8 +110,14 @@ class LoadTestOrchestrator:
         self.config = config
         self.stats = StatsCalculator()
         self.stop_event = asyncio.Event()
-        self.active_users_count = 0
-        self.active_users_lock = asyncio.Lock()
+        self.request_state_lock = asyncio.Lock()
+        self.in_flight_requests = 0
+        self.dispatch_rng = random.Random(config.workload.seed or 42)
+        self.request_semaphore = (
+            asyncio.Semaphore(config.workload.max_in_flight)
+            if config.workload.max_in_flight > 0
+            else None
+        )
         
         # Initialize Prompt Factory
         self.prompt_factory = PromptFactory(
@@ -109,6 +127,8 @@ class LoadTestOrchestrator:
             prefix=config.prompts.prefix
         )
         self.token_scheduler = TokenScheduler(config.prompts, config.workload.duration_seconds)
+        self.load_profile = LoadProfileScheduler(config.load_profile, config.workload)
+        self.think_time = ThinkTimeSampler(config.think_time, seed=(config.workload.seed or 42) + 1)
 
         # Initialize Client
         self.client = self._build_client()
@@ -131,7 +151,13 @@ class LoadTestOrchestrator:
         if config.system.enabled:
             self.system_sampler = SystemSampler(
                 interval_seconds=config.system.interval_seconds,
-                gpu_command=config.system.gpu_command
+                gpu_command=config.system.gpu_command,
+                source=config.system.source,
+                ssh_host=config.system.ssh_host,
+                ssh_user=config.system.ssh_user,
+                ssh_port=config.system.ssh_port,
+                ssh_options=config.system.ssh_options,
+                include_local_cpu_ram=config.system.include_local_cpu_ram,
             )
 
         # Initialize Prometheus
@@ -160,53 +186,200 @@ class LoadTestOrchestrator:
                 weighted_clients.append((client, s.weight))
             return WeightedCompositeClient(weighted_clients)
 
-    async def _user_session(self, session: aiohttp.ClientSession, end_time: float, user_id: int):
-        async with self.active_users_lock:
-            self.active_users_count += 1
-        
+    def _current_load_target(self) -> LoadTarget:
+        elapsed = max(0.0, time.time() - self.stats.start_time) if self.stats.start_time > 0 else 0.0
+        return self.load_profile.target_at(elapsed)
+
+    def _resolved_target_users(self, target: LoadTarget) -> int:
+        if target.target_users is not None:
+            return max(0, target.target_users)
+        return self.config.workload.users
+
+    def _resolved_target_rps(self, target: LoadTarget) -> float:
+        if target.target_rps is not None:
+            return max(0.0, target.target_rps)
+        return float(self.config.workload.users)
+
+    def _next_arrival_delay(self, target_rps: float) -> float:
+        if target_rps <= 0:
+            return 0.1
+        if self.config.workload.arrival_distribution == "poisson":
+            return self.dispatch_rng.expovariate(target_rps)
+        return 1.0 / target_rps
+
+    async def _current_in_flight(self) -> int:
+        async with self.request_state_lock:
+            return self.in_flight_requests
+
+    async def _acquire_request_slot(self) -> int:
+        if self.request_semaphore:
+            await self.request_semaphore.acquire()
+
+        async with self.request_state_lock:
+            self.in_flight_requests += 1
+            return self.in_flight_requests
+
+    async def _release_request_slot(self) -> None:
+        async with self.request_state_lock:
+            self.in_flight_requests = max(0, self.in_flight_requests - 1)
+
+        if self.request_semaphore:
+            self.request_semaphore.release()
+
+    def _build_prompt(self) -> tuple[int, str]:
+        elapsed = max(0.0, time.time() - self.stats.start_time) if self.stats.start_time > 0 else 0.0
+        target_tokens = self.token_scheduler.target_tokens(elapsed)
+        return self.prompt_factory.generate_prompt_with_size(target_tokens)
+
+    async def _sleep_or_stop(self, duration_seconds: float) -> bool:
+        timeout = max(0.0, duration_seconds)
+        if timeout <= 0:
+            return self.stop_event.is_set()
+        return await self._wait_for_stop(timeout)
+
+    async def _perform_request(
+        self,
+        session: aiohttp.ClientSession,
+        scheduled_time: float,
+        user_id: int,
+        target: LoadTarget,
+    ):
+        if time.time() >= scheduled_time and self.stop_event.is_set():
+            return None
+
+        current_in_flight = await self._acquire_request_slot()
         try:
-            while time.time() < end_time and not self.stop_event.is_set():
-                elapsed = time.time() - self.stats.start_time
-                target_tokens = self.token_scheduler.target_tokens(elapsed)
-                input_tokens, prompt = self.prompt_factory.generate_prompt_with_size(target_tokens)
-                async with self.active_users_lock:
-                    current_active = self.active_users_count
-                
-                # Send request
-                scheduled_time = time.time()
-                metric = await self.client.send_request(
-                    session, 
-                    prompt, 
-                    self.config.prompts.max_tokens, 
-                    self.config.client,
-                    input_tokens=input_tokens
-                )
-                metric.queue_wait = metric.start_time - scheduled_time
-                metric.concurrency = current_active
-                metric.user_id = user_id
-                self.stats.add_metric(metric)
-                # Optional think time could go here
+            input_tokens, prompt = self._build_prompt()
+            metric = await self.client.send_request(
+                session,
+                prompt,
+                self.config.prompts.max_tokens,
+                self.config.client,
+                input_tokens=input_tokens,
+            )
+            metric.queue_wait = max(0.0, metric.start_time - scheduled_time)
+            metric.concurrency = current_in_flight
+            metric.user_id = user_id
+            metric.target_users = self._resolved_target_users(target)
+            if self.config.workload.mode == "open_loop" or target.target_rps is not None:
+                metric.target_rps = self._resolved_target_rps(target)
+            metric.in_flight = current_in_flight
+            return metric
         finally:
-            async with self.active_users_lock:
-                self.active_users_count -= 1
+            await self._release_request_slot()
+
+    async def _closed_loop_user(self, session: aiohttp.ClientSession, end_time: float, user_id: int):
+        while time.time() < end_time and not self.stop_event.is_set():
+            target = self._current_load_target()
+            if user_id > self._resolved_target_users(target):
+                remaining = max(0.0, end_time - time.time())
+                if await self._sleep_or_stop(min(0.2, remaining)):
+                    break
+                continue
+
+            scheduled_time = time.time()
+            metric = await self._perform_request(session, scheduled_time, user_id, target)
+            if metric is None:
+                continue
+
+            think_time = self.think_time.sample(after_error=metric.error is not None)
+            metric.think_time = think_time
+            self.stats.add_metric(metric)
+
+            remaining = max(0.0, end_time - time.time())
+            if think_time > 0 and remaining > 0:
+                if await self._sleep_or_stop(min(think_time, remaining)):
+                    break
+
+    async def _open_loop_request(
+        self,
+        session: aiohttp.ClientSession,
+        end_time: float,
+        user_id: int,
+        target: LoadTarget,
+        scheduled_time: float,
+    ):
+        if scheduled_time > time.time():
+            remaining_to_launch = min(max(0.0, scheduled_time - time.time()), max(0.0, end_time - time.time()))
+            if await self._sleep_or_stop(remaining_to_launch):
+                return
+
+        if time.time() >= end_time or self.stop_event.is_set():
+            return
+
+        metric = await self._perform_request(session, scheduled_time, user_id, target)
+        if metric:
+            self.stats.add_metric(metric)
+
+    async def _open_loop_driver(self, session: aiohttp.ClientSession, end_time: float):
+        pending_tasks: Set[asyncio.Task] = set()
+        request_index = 0
+        next_launch = time.time()
+
+        while time.time() < end_time and not self.stop_event.is_set():
+            now = time.time()
+            target = self._current_load_target()
+            target_rps = self._resolved_target_rps(target)
+            if target_rps <= 0:
+                remaining = max(0.0, end_time - now)
+                if await self._sleep_or_stop(min(0.1, remaining)):
+                    break
+                next_launch = time.time()
+                continue
+
+            if now < next_launch:
+                remaining = max(0.0, end_time - now)
+                if await self._sleep_or_stop(min(next_launch - now, remaining)):
+                    break
+                continue
+
+            request_index += 1
+            max_virtual_users = max(1, self.load_profile.max_target_users())
+            user_id = ((request_index - 1) % max_virtual_users) + 1
+            scheduled_time = next_launch
+            pending_tasks.add(
+                asyncio.create_task(
+                    self._open_loop_request(session, end_time, user_id, target, scheduled_time)
+                )
+            )
+            done_tasks = {task for task in pending_tasks if task.done()}
+            for task in done_tasks:
+                task.result()
+            pending_tasks -= done_tasks
+
+            next_launch += self._next_arrival_delay(target_rps)
+            if next_launch < now - 1.0:
+                next_launch = now
+
+        if pending_tasks:
+            await asyncio.gather(*pending_tasks, return_exceptions=True)
 
     async def _progress_logger(self, start_time: float, end_time: float):
         interval = 10.0
         while time.time() < end_time and not self.stop_event.is_set():
-            await asyncio.sleep(interval)
+            remaining_before_sleep = end_time - time.time()
+            if await self._wait_for_stop(min(interval, max(0.0, remaining_before_sleep))):
+                break
             elapsed = time.time() - start_time
             remaining = end_time - time.time()
             
             snapshot = self.stats.get_current_snapshot()
-            async with self.active_users_lock:
-                current_active = self.active_users_count
+            target = self._current_load_target()
+            current_target_users = self._resolved_target_users(target) if self.config.workload.mode != "open_loop" else None
+            current_target_rps = self._resolved_target_rps(target) if self.config.workload.mode == "open_loop" else target.target_rps
+            current_in_flight = await self._current_in_flight()
 
             # Format metrics with N/A handling
             lat_p90 = snapshot.get('latency_p90')
             lat_str = f"{lat_p90:.2f}s" if lat_p90 is not None else "N/A"
+            target_users_str = str(current_target_users) if current_target_users is not None else "N/A"
+            target_rps_str = f"{current_target_rps:.1f}" if current_target_rps is not None else "N/A"
             
             print(f"\n{Fore.BLUE}[Progress @ {elapsed:.0f}s] "
-                  f"Active Users: {current_active} | "
+                  f"Mode: {self.config.workload.mode} | "
+                  f"Target Users: {target_users_str} | "
+                  f"Target RPS: {target_rps_str} | "
+                  f"In Flight: {current_in_flight} | "
                   f"Requests: {len(self.stats.metrics)} | "
                   f"RPS: {snapshot['rps']:.1f} | "
                   f"TPS: {snapshot['tps']:.1f} tok/s | "
@@ -220,13 +393,13 @@ class LoadTestOrchestrator:
             
         interval = self.config.prometheus.push_interval_seconds
         while time.time() < end_time and not self.stop_event.is_set():
-            await asyncio.sleep(interval)
+            remaining_before_sleep = end_time - time.time()
+            if await self._wait_for_stop(min(interval, max(0.0, remaining_before_sleep))):
+                break
             
             snapshot = self.stats.get_current_snapshot()
             deltas = self.stats.get_delta_counts()
-            
-            async with self.active_users_lock:
-                current_active = self.active_users_count
+            current_active = await self._current_in_flight()
 
             self.prom_exporter.update_metrics(snapshot, current_active)
             self.prom_exporter.increment_counters(
@@ -241,59 +414,74 @@ class LoadTestOrchestrator:
             except Exception as e:
                 logger.error(f"Failed to push metrics: {e}")
 
+    async def _wait_for_stop(self, timeout_seconds: float) -> bool:
+        if timeout_seconds <= 0:
+            return self.stop_event.is_set()
+
+        try:
+            await asyncio.wait_for(self.stop_event.wait(), timeout=timeout_seconds)
+            return True
+        except asyncio.TimeoutError:
+            return False
+
     async def run(self):
         duration = self.config.workload.duration_seconds
         users = self.config.workload.users
-        ramp_up = self.config.workload.ramp_up_seconds
+        self.stop_event.clear()
         
         start_time = time.time()
         end_time = start_time + duration
         
-        print(f"{Fore.CYAN}Starting load test with {users} users for {duration}s...")
+        print(f"{Fore.CYAN}Starting load test in {self.config.workload.mode} mode for {duration}s...")
         if self.config.is_mixed_warfare:
             print(f"{Fore.CYAN}Mode: Mixed Warfare ({len(self.config.servers)} endpoints)")
         else:
-            print(f"{Fore.CYAN}Target: {self.config.server.base_url}")
+            target_server = self.config.server or self.config.get_servers()[0]
+            print(f"{Fore.CYAN}Target: {target_server.base_url}")
+        print(f"{Fore.CYAN}Max Virtual Users: {self.load_profile.max_target_users()} | Max In Flight: {self.config.workload.max_in_flight or 'unlimited'}")
 
         self.stats.start_test()
-        if self.ping_monitor:
-            await self.ping_monitor.run_once()  # baseline before load
-            self.ping_monitor.start()
-        if self.system_sampler:
-            self.system_sampler.start()
-        
-        # Configure overall client timeout
-        timeout = aiohttp.ClientTimeout(
-            total=self.config.client.timeout_seconds,
-            connect=self.config.client.connect_timeout
-        )
-
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            tasks = []
+        try:
+            if self.ping_monitor:
+                await self.ping_monitor.run_once()  # baseline before load
+                self.ping_monitor.start()
+            if self.system_sampler:
+                self.system_sampler.start()
             
-            # Background tasks
-            tasks.append(asyncio.create_task(self._progress_logger(start_time, end_time)))
-            if self.prom_exporter:
-                tasks.append(asyncio.create_task(self._metrics_pusher(end_time)))
+            # Configure overall client timeout
+            timeout = aiohttp.ClientTimeout(
+                total=self.config.client.timeout_seconds,
+                connect=self.config.client.connect_timeout
+            )
 
-            # User tasks
-            if ramp_up > 0:
-                delay = ramp_up / users
-                for i in range(users):
-                    tasks.append(asyncio.create_task(self._user_session(session, end_time, user_id=i + 1)))
-                    if i < users - 1:
-                        await asyncio.sleep(delay)
-            else:
-                for i in range(users):
-                    tasks.append(asyncio.create_task(self._user_session(session, end_time, user_id=i + 1)))
-            
-            await asyncio.gather(*tasks)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                background_tasks = []
+                user_tasks = []
+                
+                # Background tasks
+                background_tasks.append(asyncio.create_task(self._progress_logger(start_time, end_time)))
+                if self.prom_exporter:
+                    background_tasks.append(asyncio.create_task(self._metrics_pusher(end_time)))
 
-        self.stats.stop_test()
-        if self.ping_monitor:
-            await self.ping_monitor.stop()
-        if self.system_sampler:
-            await self.system_sampler.stop()
+                # User tasks
+                try:
+                    if self.config.workload.mode == "open_loop":
+                        user_tasks.append(asyncio.create_task(self._open_loop_driver(session, end_time)))
+                    else:
+                        for i in range(self.load_profile.max_target_users()):
+                            user_tasks.append(asyncio.create_task(self._closed_loop_user(session, end_time, user_id=i + 1)))
+
+                    await asyncio.gather(*user_tasks)
+                finally:
+                    self.stop_event.set()
+                    if background_tasks:
+                        await asyncio.gather(*background_tasks, return_exceptions=True)
+        finally:
+            self.stats.stop_test()
+            if self.ping_monitor:
+                await self.ping_monitor.stop()
+            if self.system_sampler:
+                await self.system_sampler.stop()
         return self.stats
 
     def save_report(
@@ -308,7 +496,8 @@ class LoadTestOrchestrator:
         summary = self.stats.calculate_summary()
         timestamp = dt.now().strftime("%Y%m%d_%H%M%S")
         suffix = f"_{label}" if label else ""
-        model_name = self.config.server.name if self.config.server else "default"
+        target_server = self.config.server or self.config.get_servers()[0]
+        model_name = target_server.name
         run_id = run_id or f"{model_name}_{timestamp}{suffix}"
         
         # Print Console Summary
@@ -331,8 +520,12 @@ class LoadTestOrchestrator:
                 "latency": m.latency_seconds,
                 "queue_wait": m.queue_wait,
                 "concurrency": m.concurrency,
+                "target_users": m.target_users,
+                "target_rps": m.target_rps,
+                "in_flight": m.in_flight,
                 "input_tokens": m.input_tokens,
                 "output_tokens": m.output_tokens,
+                "think_time": m.think_time,
                 "tps": m.tokens_per_second,
                 "latency_per_token": m.latency_per_token,
                 "error": m.error,
@@ -374,6 +567,10 @@ class LoadTestOrchestrator:
             "summary_error_breakdown": json.dumps(summary.error_breakdown) if summary.error_breakdown else None,
             "summary_per_user_throughput": json.dumps(summary.per_user_throughput) if summary.per_user_throughput else None,
             "summary_tokens_vs_concurrency": json.dumps(summary.tokens_vs_concurrency) if summary.tokens_vs_concurrency else None,
+            "summary_target_users_mean": summary.target_users_mean,
+            "summary_target_rps_mean": summary.target_rps_mean,
+            "summary_max_in_flight": summary.max_in_flight,
+            "summary_think_time_mean": summary.think_time_mean,
             "bottleneck_hint": bottleneck_hint,
         }
 
@@ -418,6 +615,7 @@ class LoadTestOrchestrator:
                     "ram_used_mb": s.get("ram_used_mb"),
                     "ram_percent": s.get("ram_percent"),
                     "gpu": json.dumps(s.get("gpu")),
+                    "system_source": s.get("system_source"),
                 })
 
         ttft_rows = self._ttft_vs_input_rows(run_id, label, model_name, iteration)
@@ -723,6 +921,15 @@ class LoadTestOrchestrator:
         print(f"Duration: {summary.total_duration:.2f}s")
         print(f"RPS: {summary.rps:.2f}")
         print(f"Global Throughput: {summary.global_throughput_tokens_per_sec:.2f} tokens/sec")
+        print(f"Workload Mode: {self.config.workload.mode}")
+
+        if summary.target_users_mean is not None or summary.target_rps_mean is not None:
+            print(f"Average Target Users: {fmt(summary.target_users_mean, decimals=2)}")
+            print(f"Average Target RPS: {fmt(summary.target_rps_mean, decimals=2)}")
+        if summary.max_in_flight is not None:
+            print(f"Max In Flight Observed: {summary.max_in_flight}")
+        if summary.think_time_mean is not None:
+            print(f"Average Think Time: {fmt(summary.think_time_mean)}s")
 
         # Print Legend
         print(f"\n{Fore.WHITE}=== Legend ===")
