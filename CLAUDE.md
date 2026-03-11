@@ -24,10 +24,11 @@
 
 ## 🤖 Project Synopsis
 **LLM Stress Testing Tool:**
-A robust, modular load-testing repository targeting local GPU servers running `llama.cpp`.
-- **Purpose:** Test limits of GPU servers hosting multiple models (e.g., "Thinker" vs "Flash").
-- **Stack:** Python, `aiohttp`, `numpy`, `PyYAML`.
+A robust, modular load-testing repository targeting local or remote GPU servers running `llama.cpp` or Ollama.
+- **Purpose:** Stress test inference servers with realistic traffic shapes, dynamic concurrency, and remote GPU observability.
+- **Stack:** Python, `aiohttp`, `numpy`, `PyYAML`, `pydantic`.
 - **Core Components:**
-    - `src/client`: Async HTTP client.
+    - `src/clients`: Async HTTP clients and weighted routing.
     - `src/generators`: Prompt factories with deterministic randomness.
-    - `src/metrics`: Latency and throughput calculation.
+    - `src/engine`: Runtime orchestration and load-profile scheduling.
+    - `src/metrics`: Latency, throughput, and system sampling.

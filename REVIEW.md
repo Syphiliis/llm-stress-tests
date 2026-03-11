@@ -1,78 +1,62 @@
-# Revue du Code : LLM Stress Tests
+# Repository Review
 
-**Date :** 14 Janvier 2026
-**Projet :** llm-stress-tests
+**Date:** March 11, 2026  
+**Project:** `llm-stress-tests`
 
----
+## Current State
 
-## 1. Synthèse Globale
+The repository is in a materially better place than the initial baseline.
+It now supports:
 
-Le projet est une base solide et fonctionnelle pour effectuer des tests de charge distribués sur des serveurs d'inférence LLM (spécifiquement `llama.cpp`). L'architecture suit les bonnes pratiques de programmation asynchrone en Python, ce qui est crucial pour simuler une charge utilisateur élevée.
+- validated YAML configuration through `pydantic`
+- single-endpoint and multi-endpoint runs
+- `closed_loop`, `open_loop`, and `hybrid` execution modes
+- dynamic load profiles (`burst`, `spike`, `wave`, `cooldown`, `composite`)
+- realistic think time
+- Ollama `/api/generate` support
+- combined CSV reporting
+- remote GPU sampling over SSH
+- direct unit coverage for config, clients, load profiles, sampling, and think time
 
-Le code est concis, modulaire et offre une très bonne observabilité grâce à l'intégration récente de Prometheus et aux rapports terminaux/JSON détaillés.
+## Strengths
 
-**Note de Santé :** 🟢 Stable / Bon départ
-**Dette Technique :** Faible, mais l'absence de tests unitaires et de validation stricte de la configuration pourrait poser problème à mesure que le projet grandit.
+### Async execution model
 
----
+The `asyncio` and `aiohttp` architecture remains the right base for high-concurrency client-side load generation.
 
-## 2. Points Forts Architecturels
+### Better operational realism
 
-### ✅ Programmation Asynchrone (AsyncIO)
-L'utilisation de `aiohttp` et `asyncio` est le bon choix technique pour ce type d'outil I/O bound. La gestion de la concurrence via `asyncio.gather` et les tâches d'arrière-plan (`progress_logger_task`, `metrics_pusher_task`) est bien implémentée.
+The scheduler is no longer limited to a startup ramp followed by a flat plateau. The new workload modes and load profiles make it possible to reproduce meaningful production traffic patterns.
 
-### ✅ Moduarité
-La séparation des responsabilités est claire :
-- `main.py` : Orchestration et flux principal.
-- `src.client` : Gestion bas niveau des requêtes HTTP et retries.
-- `src.metrics` : Calculs statistiques isolés (utilisation de `numpy` pour la performance).
-- `src.generators` : Création des prompts.
+### Better observability
 
-### ✅ Observabilité
-L'outil excelle dans la restitution des résultats :
-- Métriques en temps réel dans la console.
-- Export temps réel vers Prometheus (Pushgateway) pour monitoring graphique.
-- Sauvegarde JSON détaillée pour post-analyse.
-- Analyse automatique ("Verdicts") en fin de test (CRITICAL/WARNING/PASS).
+The tool now exposes target load, in-flight pressure, queue wait, per-user throughput, TTFT drift, and remote GPU metrics in a single CSV export.
 
----
+### Better safety
 
-## 3. Points d'Amélioration (Code & Robustesse)
+Configuration validation is stricter, exit codes are correct on failure paths, optional dependencies are handled more defensively, and the test suite covers the most important regression vectors.
 
-### ⚠️ Gestion du Protocole (Hardcoding)
-Dans `src/client/api_client.py`, le parsing de la réponse streaming est étroitement couplé au format `llama.cpp` (`data: {"content": ...}`).
-- **Risque** : Cela rend l'outil incompatible avec d'autres backends standards comme vLLM ou TGI (OpenAI-compatible) qui peuvent avoir des formats légèrement différents.
-- **Recommandation** : Abstraire le client pour supporter différents "BackendParsers" (ex: `LlamaCppParser`, `OpenAIParser`).
+## Remaining Limits
 
-### ⚠️ Absence de Tests
-Il n'y a pas de répertoire `tests/` ni de tests unitaires.
-- **Risque** : Les régressions sont difficiles à détecter lors des modifications (ex: changement dans le calcul des centiles).
-- **Recommandation** : Ajouter `pytest` et couvrir a minima `metrics/stats.py` (calculs mathématiques simples) et mocker `api_client.py`.
+### Hybrid mode is not yet a true overlay
 
-### ⚠️ Validation de la Configuration
-La configuration est chargée directement depuis le YAML sans validation de schéma.
-- **Risque** : Une clé manquante ou un type incorrect (ex: string au lieu de int) fera planter le script au runtime.
-- **Recommandation** : Utiliser `pydantic` pour définir des modèles de configuration et valider le YAML au chargement.
+`hybrid` is still a user-driven mode with dynamic user targets and think time. It does not yet combine a persistent user population with an independent open-loop injection layer.
 
-### ℹ️ Typing
-Les annotations de type sont présentes mais pas partout, et il n'y a pas de vérification statique.
-- **Recommandation** : Compléter les type hints et ajouter `mypy` au processus de développement.
+### Remote host visibility is partial
 
----
+GPU metrics can be collected over SSH, but remote CPU and RAM are not yet sampled from the same host.
 
-## 4. Documentation
+### Single-generator ceiling
 
-Le `README.md` est clair mais commence à être obsolète par rapport aux fonctionnalités du code :
-- **Manquant** : Documentation de la configuration "Mixed Warfare" (multi-serveurs).
-- **Manquant** : Instructions pour configurer Prometheus/Pushgateway.
+At very high target rates, the load generator itself can become part of the bottleneck. Distributed generators are not implemented yet.
 
----
+## Recommended Next Steps
 
-## 5. Plan d'Action Recommandé
+1. Implement a true hybrid overlay: closed-loop background users plus independent open-loop bursts.
+2. Add remote CPU and RAM sampling for the GPU host.
+3. Add distributed runner support when a single client is no longer enough.
+4. Extend stats coverage further around reporting and CSV serialization if the output format keeps evolving.
 
-Voici une liste priorisée de tâches pour améliorer le projet :
+## Summary
 
-1.  **Immédiat** : Mettre à jour le `README.md` pour refléter les nouvelles capacités (Prometheus, Multi-serveurs).
-2.  **Court Terme** : Ajouter un modèle `pydantic` pour valider `config/workload.yaml` au démarrage.
-3.  **Moyen Terme** : Refactoriser `api_client.py` pour supporter une interfacce "OpenAI-compatible" générique, permettant de tester vLLM/Ollama/TGI sans modifier le code.
-4.  **Fondamental** : Mettre en place une suite de tests unitaires (`pytest`).
+This is now a credible LLM stress-testing tool rather than a simple concurrency loop. The remaining work is mostly about deeper production realism and scaling the generator itself, not fixing core architectural weaknesses.

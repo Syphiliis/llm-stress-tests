@@ -1,271 +1,274 @@
-# LLM Load Testing Tool - Usage Guide
+# LLM Stress Test Tool - Usage Guide
 
 ## Overview
 
-This tool provides comprehensive load testing for LLM inference servers with support for:
-- **Single Endpoint Testing**: Traditional load testing against one model
-- **Mixed Warfare**: Simultaneous testing of multiple models to observe resource contention
-- **Real-time Progress Monitoring**: Live console updates during test execution
-- **Detailed Metrics**: TTFT, latency percentiles, throughput, error rates
-- **Optional Prometheus Integration**: Push metrics to Prometheus Pushgateway (if needed)
+This repository is a Python async load generator for `llama.cpp` and Ollama inference endpoints.
+It is designed to answer production-style questions such as:
 
-## Quick Start
+- What happens to TTFT and latency when concurrency ramps up?
+- How does the model behave during bursts or abrupt spikes?
+- Does the GPU recover cleanly after a short overload window?
+- Is the client itself queueing work before the server becomes the bottleneck?
 
-### 1. Installation
+The current implementation supports:
+
+- workload modes: `closed_loop`, `open_loop`, `hybrid`
+- load profiles: `constant`, `ramp`, `burst`, `spike`, `wave`, `cooldown`, `composite`
+- arrival patterns: deterministic or Poisson
+- user think time: `fixed`, `uniform`, `exponential`, `lognormal`
+- system sampling: local GPU or remote GPU over SSH
+- combined CSV export with request, summary, ping, system, and analysis rows
+
+For the repository layout, see [STRUCTURE.md](./STRUCTURE.md).
+
+## Installation
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2. Single Endpoint Testing
+## Fast Start
 
-Test a single llama.cpp server:
+Run the default single-endpoint scenario:
 
 ```bash
 python main.py --config config/workload.yaml
 ```
 
-**Default config (config/workload.yaml):**
-```yaml
-server:
-  base_url: "http://127.0.0.1:8080/completion"
-  model_alias: "llama-2-7b-chat"
-
-workload:
-  users: 20
-  duration_seconds: 120
-  ramp_up_seconds: 10
-  seed: 42
-
-prompts:
-  min_tokens: 50
-  max_tokens: 200
-  prefix: "Please summarize the following text: "
-
-prometheus:
-  enabled: false  # Disable if you have Grafana connected to llama.cpp
-```
-
-### 3. Mixed Warfare Testing
-
-Test two models simultaneously to observe GPU contention:
+Run the interactive launcher:
 
 ```bash
-python main.py --config config/mixed_warfare.yaml
+python cli.py
 ```
 
-**Mixed Warfare config (config/mixed_warfare.yaml):**
-```yaml
-servers:
-  - name: "Thinker"
-    base_url: "http://127.0.0.1:8080/completion"
-    model_alias: "llama-2-70b-chat"
-    weight: 0.3  # 30% of requests
+Run the test suite:
 
-  - name: "Flash"
-    base_url: "http://127.0.0.1:8081/completion"
-    model_alias: "llama-2-7b-chat"
-    weight: 0.7  # 70% of requests
+```bash
+python3 -m unittest discover -s tests -v
+python3 -m compileall .
+```
+
+## Picking the Right Mode
+
+### `closed_loop`
+
+Each virtual user waits for the previous response before sending the next request.
+
+Use it when you want to model user-driven concurrency and observe how latency changes under growing parallelism.
+
+### `open_loop`
+
+Requests are launched according to a target rate, even if latency grows.
+
+Use it when you want to preserve pressure during overload and avoid the classic closed-loop effect where throughput collapses simply because the client is waiting on responses.
+
+### `hybrid`
+
+This is still user-driven like closed-loop, but it supports dynamic user targets over time and realistic think time.
+
+Use it when you want traffic that looks more human than a tight request loop.
+
+## Picking the Right Profile
+
+- `constant`: fixed load for the full run
+- `ramp`: progressive increase or decrease
+- `burst`: repeated short peaks over a base load
+- `spike`: abrupt temporary jump
+- `wave`: cyclic shape with `sine`, `triangle`, or `sawtooth`
+- `cooldown`: progressive descent after a peak
+- `composite`: multiple segments chained together
+
+## Common Scenarios
+
+### 1. Stable Concurrency Test
+
+```yaml
+server:
+  name: "flash"
+  base_url: "http://localhost:8080/completion"
 
 workload:
   users: 20
-  duration_seconds: 120
-  ramp_up_seconds: 10
+  duration_seconds: 600
+  mode: closed_loop
+  max_in_flight: 64
   seed: 42
 
 prompts:
-  min_tokens: 50
-  max_tokens: 200
-  prefix: "Please summarize the following text: "
+  min_tokens: 128
+  max_tokens: 1024
 ```
 
-## Understanding the Output
-
-### Real-Time Progress Updates
-
-Every 10 seconds during the test:
-```
-[Progress @ 30s] Active Users: 20 | Requests: 145 | RPS: 4.8 | TPS: 58.3 tok/s | P90 Latency: 2.45s | Errors: 0.0% | Time Left: 90s
-```
-
-### Final Test Summary
-
-After test completion:
-```
-=== Test Summary ===
-Total Requests: 580
-Successful: 576
-Failed: 4
-Duration: 120.23s
-RPS: 4.79
-Global Throughput: 57.82 tokens/sec
-
-=== Latency (s) ===
-P50: 1.234
-P90: 2.456
-P99: 3.789
-
-=== TTFT (s) ===
-P50: 0.123
-P90: 0.456
-P99: 0.789
-
-=== Automatic Analysis ===
-PASS: Error rate is acceptable (0.7%)
-WARNING: P90 Latency is high (2.46s). User experience degraded.
-PASS: TTFT is excellent (0.12s).
-```
-
-### Per-Endpoint Breakdown (Mixed Warfare Only)
-
-```
-=== Per-Endpoint Breakdown ===
-
-  Flash:
-    Total Requests: 406
-    Successful: 404
-    Failed: 2
-    Latency P50/P90/P99: 0.856s / 1.234s / 2.145s
-    TTFT P50/P90/P99: 0.089s / 0.156s / 0.234s
-    Total Tokens: 81200
-    Throughput: 675.32 tokens/sec
-
-  Thinker:
-    Total Requests: 174
-    Successful: 172
-    Failed: 2
-    Latency P50/P90/P99: 3.456s / 5.678s / 8.901s
-    TTFT P50/P90/P99: 0.234s / 0.456s / 0.678s
-    Total Tokens: 34400
-    Throughput: 286.12 tokens/sec
-```
-
-## Advanced Features
-
-### Configurable Workload Parameters
-
-- **users**: Number of concurrent virtual users
-- **duration_seconds**: Total test duration
-- **ramp_up_seconds**: Time to gradually reach full concurrency (0 = immediate)
-- **seed**: Deterministic random seed for reproducible tests
-
-### Prompt Generation
-
-- **min_tokens**: Minimum prompt length (approximate)
-- **max_tokens**: Maximum generation length per request
-- **prefix**: Optional prefix for all prompts
-
-### Results Export
-
-All test results are saved to `results/test_run_TIMESTAMP.json`:
-
-```json
-{
-  "config": { ... },
-  "summary": "...",
-  "details": [
-    {
-      "request_id": "abc-123",
-      "endpoint": "Flash",
-      "start_ts": 1234567890.123,
-      "end_ts": 1234567891.456,
-      "ttft": 0.089,
-      "latency": 1.333,
-      "output_tokens": 200,
-      "tps": 150.0,
-      "error": null
-    },
-    ...
-  ]
-}
-```
-
-## Prometheus Integration (Optional)
-
-If you need client-side metrics pushed to a separate Prometheus instance:
+### 2. Open-Loop Spike
 
 ```yaml
-prometheus:
+workload:
+  users: 8
+  duration_seconds: 900
+  mode: open_loop
+  arrival_distribution: poisson
+  max_in_flight: 128
+
+load_profile:
+  type: spike
+  base_rps: 2
+  peak_rps: 20
+  start_at_seconds: 300
+  hold_seconds: 45
+```
+
+### 3. Production-Like Wave With Think Time
+
+```yaml
+workload:
+  users: 20
+  duration_seconds: 1800
+  mode: hybrid
+  max_in_flight: 128
+
+load_profile:
+  type: wave
+  min_users: 20
+  max_users: 120
+  period_seconds: 180
+  shape: triangle
+
+think_time:
   enabled: true
-  pushgateway_url: "localhost:9091"
-  job_name: "llm_load_test"
-  instance_name: "local_test"
-  push_interval_seconds: 5
-  # Optional authentication
-  # username: "admin"
-  # password: "secret"
+  distribution: lognormal
+  mean_seconds: 1.2
+  max_seconds: 8
 ```
 
-**Metrics pushed:**
-- `llm_client_lag_p50/p90/p99_seconds`: Latency percentiles
-- `llm_ttft_p50/p90/p99_seconds`: Time to first token percentiles
-- `llm_tokens_per_second`: Throughput
-- `llm_request_rate_per_second`: RPS
-- `llm_error_rate`: Overall error rate
-- `llm_contention_error_rate`: Timeout/503 errors indicating resource contention
-- `llm_active_users`: Current concurrent users
+### 4. Remote GPU Sampling
 
-## Interpreting Results for GPU Contention
-
-When running Mixed Warfare tests to observe GPU contention:
-
-1. **Compare TTFT between models**: Higher TTFT indicates the model is waiting for GPU resources
-2. **Look for increased P90/P99 latency**: Tail latency degradation suggests resource competition
-3. **Monitor contention_error_rate**: Timeouts and 503 errors indicate severe overload
-4. **Compare throughput**: Check if combined TPS is less than sum of individual TPS
-
-**Example Analysis:**
-```
-Flash (7B model):
-  - TTFT P50: 0.089s (good)
-  - Latency P90: 1.234s (acceptable)
-  - Throughput: 675 tok/s
-
-Thinker (70B model):
-  - TTFT P50: 0.234s (slower, waiting for GPU)
-  - Latency P90: 5.678s (high, resource contention)
-  - Throughput: 286 tok/s (reduced)
+```yaml
+system:
+  enabled: true
+  source: ssh
+  ssh_host: "gpu-host.example.com"
+  ssh_user: "ubuntu"
+  ssh_port: 22
+  interval_seconds: 10
 ```
 
-This suggests "Thinker" is experiencing significant GPU contention from "Flash" requests.
+### 5. Ollama Endpoint
 
-## Best Practices
+```yaml
+server:
+  name: "ollama"
+  base_url: "http://localhost:11434/api/generate"
+  model_alias: "qwen2.5:7b"
+```
 
-1. **Warm-up**: Run a short test first to warm up the server before collecting metrics
-2. **Ramp-up**: Use `ramp_up_seconds` to avoid thundering herd at test start
-3. **Realistic Workload**: Adjust `min_tokens`, `max_tokens`, and `users` to match your expected traffic
-4. **Multiple Runs**: Run tests multiple times and average results for reliability
-5. **Monitor Server-Side**: Use your existing Grafana dashboard to correlate client metrics with GPU utilization
+The client detects the Ollama path and switches payload/stream parsing automatically.
+
+## Example Config Files
+
+- `config/workload.yaml`: default single-endpoint scenario
+- `config/production_wave.yaml`: hybrid wave with remote GPU sampling
+- `config/open_loop_spike_poisson.yaml`: open-loop Poisson spike
+- `config/burst_cooldown.yaml`: burst and cooldown composite profile
+- `config/comparison_flash_thinker.yaml`: sequential multi-endpoint comparison
+
+## Reading the Output
+
+Each run writes a combined CSV under `results/<timestamp>/combined_results.csv`.
+
+Important record types:
+
+- `request`: one row per request
+- `summary`: aggregate metrics for the run
+- `config`: serialized config used for the run
+- `ping`: network snapshots
+- `system`: CPU/RAM/GPU snapshots
+- `ttft_vs_input`: TTFT bucketed by input size
+- `tokens_vs_concurrency`: throughput bucketed by concurrency
+- `reactivity`: early vs late TTFT drift
+- `per_user_tps`: per-user throughput
+- `comparison`: comparison rows when running sequential multi-model tests
+
+Important columns:
+
+- `ttft`: time to first token
+- `latency`: end-to-end latency
+- `queue_wait`: time spent waiting before a request could actually start
+- `target_users`: intended concurrency at that moment
+- `target_rps`: intended launch rate at that moment
+- `in_flight`: observed in-process request count when the request started
+- `think_time`: sampled pause after the previous request in user-driven modes
+
+## How To Interpret Results
+
+### For GPU saturation
+
+Watch these together:
+
+- `ttft_p50` and `ttft_p90`
+- `latency_p90`
+- `tokens_vs_concurrency`
+- remote GPU utilization and memory usage
+
+If TTFT rises early while GPU utilization stays high, the model is usually waiting on scarce compute.
+
+### For client-side bottlenecks
+
+Watch:
+
+- `queue_wait`
+- `in_flight`
+- `max_in_flight`
+
+If queue wait climbs before the server metrics degrade, the client-side concurrency cap is probably constraining the run.
+
+### For recovery after spikes
+
+Use:
+
+- `spike` or `burst` profiles
+- `reactivity` rows
+- early vs late TTFT changes
+
+If TTFT remains elevated long after the spike, the system is recovering slowly.
 
 ## Troubleshooting
 
-**Connection refused errors:**
-- Verify llama.cpp server is running on the specified URL
-- Check firewall settings
+### Connection refused
 
-**High error rates:**
-- Reduce number of concurrent users
-- Increase server timeout settings
-- Check server logs for issues
+- verify the endpoint URL and port
+- confirm the inference server is reachable from the load generator host
+- check local firewall or SSH tunnel configuration
 
-**Inconsistent results:**
-- Use same `seed` value for reproducible tests
-- Ensure server is not under external load
-- Check for thermal throttling on GPU
+### High error rate
 
-## Architecture
+- lower `users`, `target_rps`, or `max_in_flight`
+- increase client timeout settings
+- inspect inference server logs for OOM, context, or batching failures
 
-```
-main.py                         # Orchestrates the test
-├── src/client/
-│   └── api_client.py          # LoadTester: HTTP client with streaming support
-├── src/generators/
-│   └── prompt_factory.py      # PromptFactory: Deterministic prompt generation
-└── src/metrics/
-    ├── stats.py               # StatsCalculator: Metrics aggregation
-    └── prometheus_exporter.py # PrometheusExporter: Optional metrics export
-```
+### No GPU metrics
 
-## Contributing
+- verify `nvidia-smi` exists on the target host
+- if using SSH, verify key-based auth or non-interactive access works
+- check `system.gpu_command` if your environment needs a custom query
 
-Found issues or have suggestions? This is your internal tool - modify as needed!
+### Results look too flat
+
+- use `open_loop` instead of `closed_loop`
+- add `burst`, `spike`, or `wave`
+- enable `think_time` for more realistic user pacing
+
+## Current Limits
+
+- `hybrid` is still user-driven; it is not yet a full closed-loop plus open-loop overlay
+- distributed multi-generator runs are not implemented
+- remote CPU and RAM collection from the GPU host is not implemented yet
+
+## Code Pointers
+
+- [main.py](./main.py): non-interactive runner
+- [cli.py](./cli.py): interactive launcher
+- [src/engine/orchestrator.py](./src/engine/orchestrator.py): runtime orchestration
+- [src/engine/load_profile.py](./src/engine/load_profile.py): load target scheduler
+- [src/generators/think_time.py](./src/generators/think_time.py): think time distributions
+- [src/metrics/stats.py](./src/metrics/stats.py): aggregation and verdicts
+- [src/metrics/system_sampler.py](./src/metrics/system_sampler.py): local and SSH GPU sampling
